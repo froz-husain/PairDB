@@ -46,9 +46,13 @@ The Storage Node is a stateful service that stores and serves key-value data. It
 - Recovery on node restart
 
 #### 3.2.3 Cache Manager
-- In-memory LRU/LFU cache for frequently accessed keys
+- In-memory adaptive cache for frequently accessed keys
+- **Adaptive Eviction Policy**: Combines LRU and LFU based on access patterns
+  - Hot keys (frequently accessed): Use LFU component
+  - Recent keys: Use LRU component
+  - Adaptive scoring: `score = frequency_weight * access_count + recency_weight * time_since_last_access`
+  - Automatically adjusts weights based on workload
 - Tenant-aware caching
-- Cache eviction policies
 - Cache warming strategies
 
 #### 3.2.4 MemTable Manager
@@ -331,15 +335,31 @@ SSTables (Disk) ← Persistent Storage
 - **Format**: Append-only log file
 - **Location**: Disk (separate directory)
 - **Entry Format**: `tenant_id|key|value|vector_clock|timestamp`
-- **Rotation**: When memtable flushes to SSTable
+- **Rotation Policy**:
+  - **Size-based**: Rotate when commit log reaches default size (e.g., 1GB)
+  - **Time-based**: Rotate commit logs older than a few days (e.g., 3-7 days)
+  - **Event-based**: Truncate after memtable flushes to SSTable (data persisted)
 - **Recovery**: Replay commit log on node restart
+- **Archival**: Old commit logs can be archived or deleted after verification
 
 ### 5.3 In-Memory Cache
 - **Purpose**: Fast lookup for frequently accessed keys
-- **Type**: LRU or LFU eviction policy
+- **Type**: Adaptive eviction policy (combines LRU and LFU)
 - **Key Format**: `{tenant_id}:{key}`
 - **Size**: Configurable (e.g., 1GB per node)
-- **Eviction**: When cache is full, evict least recently/frequently used
+- **Adaptive Eviction Policy**:
+  - **Hot Keys**: Frequently accessed keys use LFU (Least Frequently Used) - prioritize by access frequency
+  - **Recent Keys**: Recently accessed keys use LRU (Least Recently Used) - prioritize by recency
+  - **Adaptive Algorithm**: 
+    - Monitor access patterns for each key
+    - Calculate score: `score = frequency_weight * access_count + recency_weight * time_since_last_access`
+    - Evict keys with lowest scores when cache is full
+    - Automatically adjust weights based on workload patterns
+  - **Benefits**: 
+    - Better hit rates for mixed workloads
+    - Adapts to changing access patterns
+    - Balances between frequency and recency
+- **Eviction**: When cache is full, evict keys with lowest adaptive scores
 
 ### 5.4 MemTable
 - **Purpose**: Write-optimized in-memory storage
@@ -349,29 +369,100 @@ SSTables (Disk) ← Persistent Storage
 - **Flush Target**: New SSTable on disk
 
 ### 5.5 SSTables
+
 - **Purpose**: Persistent, read-optimized storage
 - **Format**: Immutable sorted string tables
 - **Location**: Disk (separate directory)
 - **Organization**: Multiple SSTables per node, per tenant
-- **Compaction**: Background process to merge and clean up SSTables
+- **Compaction Strategy**: Hybrid approach combining size-tiered and level-based compaction
+
+#### 5.5.1 Level-Based Compaction Structure
+
+SSTables are organized into levels with increasing size thresholds:
+
+- **L0 (Level 0)**: 
+  - Size: 64MB per SSTable
+  - Source: MemTable flushes
+  - Multiple small SSTables allowed
+  - Fast writes, may have overlapping key ranges
+  
+- **L1 (Level 1)**:
+  - Size: 128MB per SSTable
+  - Source: Compaction of L0 SSTables
+  - No overlapping key ranges within level
+  - Better read performance
+  
+- **L2 (Level 2)**:
+  - Size: 256MB per SSTable
+  - Source: Compaction of L1 SSTables
+  
+- **L3+ (Higher Levels)**:
+  - Size: Doubles at each level (512MB, 1GB, 2GB, etc.)
+  - Source: Compaction from previous level
+  - Larger SSTables for older data
+
+#### 5.5.2 Compaction Process
+
+**Level 0 Compaction**:
+- When L0 has too many SSTables (e.g., > 4), trigger compaction
+- Merge L0 SSTables into L1 SSTables
+- Remove duplicates, keep latest version
+
+**Level N Compaction**:
+- When level N exceeds size threshold, compact to level N+1
+- Merge SSTables from level N into level N+1
+- Maintain sorted order, remove duplicates
+
+**Compaction Benefits**:
+- Reduces read amplification (fewer SSTables to check)
+- Reduces disk space usage (removes duplicates and old versions)
+- Maintains sorted structure for efficient reads
+- Background process, doesn't block reads/writes
 
 ## 6. Data Structures
 
 ### 6.1 Key-Value Entry
 ```go
+type VectorClockEntry struct {
+    CoordinatorNodeID string
+    LogicalTimestamp  int64
+}
+
+type VectorClock []VectorClockEntry
+
 type KeyValueEntry struct {
     TenantID    string
     Key         string
     Value       []byte
-    VectorClock map[string]int64
+    VectorClock VectorClock  // List of {coordinator_node_id, logical_timestamp}
     Timestamp   int64
 }
 ```
 
 ### 6.2 Vector Clock
-- **Format**: `map[replica_id]logical_timestamp`
-- **Example**: `{"replica_1": 5, "replica_2": 3, "replica_3": 2}`
-- **Storage**: Serialized with each key-value pair
+
+- **Format**: List of `{coordinator_node_id, logical_timestamp}` pairs
+- **Data Structure**:
+```go
+type VectorClockEntry struct {
+    CoordinatorNodeID string
+    LogicalTimestamp  int64
+}
+
+type VectorClock []VectorClockEntry
+```
+
+- **Example**:
+```go
+vectorClock := VectorClock{
+    {CoordinatorNodeID: "coord-1", LogicalTimestamp: 5},
+    {CoordinatorNodeID: "coord-2", LogicalTimestamp: 3},
+    {CoordinatorNodeID: "coord-3", LogicalTimestamp: 2},
+}
+```
+
+- **Storage**: Serialized as JSON or binary format with each key-value pair
+- **Comparison**: Compare entries by coordinator_node_id, then by logical_timestamp
 
 ## 7. Key Operations
 
@@ -399,11 +490,30 @@ type KeyValueEntry struct {
 5. **Clear MemTable**: Create new empty memtable
 
 ### 7.4 SSTable Compaction
-1. **Trigger**: Background process, periodic or on threshold
-2. **Select SSTables**: Choose SSTables to merge
-3. **Merge**: Merge sorted SSTables, remove duplicates
-4. **Write**: Write merged data to new SSTable
-5. **Cleanup**: Delete old SSTables
+
+**Level-Based Compaction Process**:
+
+1. **L0 Compaction Trigger**: 
+   - When L0 has > 4 SSTables (or total size > threshold)
+   - Trigger compaction to L1
+
+2. **Level N Compaction Trigger**:
+   - When level N exceeds size threshold
+   - Trigger compaction to level N+1
+
+3. **Compaction Steps**:
+   - Select SSTables from source level
+   - Merge sorted SSTables (maintain sort order)
+   - Remove duplicates (keep latest version based on vector clock)
+   - Write merged data to target level SSTable
+   - Update metadata and indexes
+   - Cleanup: Delete old SSTables after verification
+
+4. **Background Execution**:
+   - Compaction runs in background threads
+   - Doesn't block reads/writes
+   - Throttled to avoid impacting normal operations
+   - Prioritizes levels with most overlap or highest read amplification
 
 ### 7.5 Migration Operations
 
@@ -513,7 +623,35 @@ func StreamKeys(tenantID string, keyRangeStart string, keyRangeEnd string) {
 
 ## 11. Monitoring and Observability
 
-### 11.1 Metrics
+### 11.1 Health Checks with Gossip Protocol
+
+**Gossip Protocol Implementation**:
+- Storage nodes use gossip protocol for peer-to-peer health monitoring
+- **Gossip Mechanism**:
+  - Each node periodically (e.g., every 5 seconds) selects random peers
+  - Exchanges health status with selected peers
+  - Health status includes: node_id, status (healthy/degraded/unhealthy), timestamp, metrics
+  - Health information propagates through gossip network
+- **Failure Detection**:
+  - Fast detection of node failures (typically within 15-30 seconds)
+  - No single point of failure (decentralized)
+  - Self-organizing network
+- **Health Status Propagation**:
+  - Coordinator nodes subscribe to gossip events
+  - Coordinators update routing tables based on health status
+  - Unhealthy nodes are removed from routing automatically
+
+**Health Status Format**:
+```go
+type HealthStatus struct {
+    NodeID    string
+    Status    string  // "healthy", "degraded", "unhealthy"
+    Timestamp int64
+    Metrics   map[string]float64  // cpu_usage, memory_usage, disk_usage, etc.
+}
+```
+
+### 11.2 Metrics
 - Write/read QPS
 - Latency percentiles (p50, p95, p99)
 - Cache hit rate
@@ -522,18 +660,21 @@ func StreamKeys(tenantID string, keyRangeStart string, keyRangeEnd string) {
 - Disk usage
 - Memory usage
 - Commit log size
+- Gossip protocol metrics (peer connections, health propagation time)
 
-### 11.2 Logging
+### 11.3 Logging
 - Write/read operations (with tenant_id, key)
 - Memtable flushes
 - SSTable compactions
 - Errors and exceptions
+- Gossip protocol events (peer connections, health status updates)
 
-### 11.3 Health Checks
+### 11.4 Health Checks
 - Disk space availability
 - Memory usage
 - Commit log health
 - SSTable integrity
+- Gossip protocol connectivity
 
 ## 12. Scalability Considerations
 
@@ -558,18 +699,30 @@ func StreamKeys(tenantID string, keyRangeStart string, keyRangeEnd string) {
 ### 13.1 Containerization
 - Docker container with storage node service
 - Persistent volumes for commit logs and SSTables
-- Health check endpoints
+- Health check endpoints (for Kubernetes liveness/readiness probes)
 
 ### 13.2 Orchestration
-- Kubernetes StatefulSet (for persistent storage)
-- Node affinity for dedicated storage nodes
-- Persistent volume claims for data
+
+**Kubernetes Deployment**:
+- **StatefulSet**: Used for storage nodes (stateful, persistent storage)
+  - Stable network identities (headless service)
+  - Ordered deployment and scaling
+  - Persistent volume claims for commit logs and SSTables
+  - Pod disruption budgets for high availability
+- **Node Affinity**: Optional node affinity for dedicated storage nodes
+- **Resource Limits**: CPU and memory limits per pod
+- **Health Probes**:
+  - Liveness probe: Health check endpoint
+  - Readiness probe: Check if node can accept requests
 
 ### 13.3 Configuration
-- Environment variables for:
+- **ConfigMaps**: For non-sensitive configuration
   - Data directory paths
   - Cache size
   - Memtable size threshold
-  - Compaction policies
-  - Commit log rotation policies
+  - Compaction policies (level sizes: L0=64MB, L1=128MB, etc.)
+  - Commit log rotation policies (default size, time-based: few days)
+  - Gossip protocol settings (interval, peer count)
+- **Secrets**: For sensitive data (if needed)
+- **Environment Variables**: For runtime configuration overrides
 

@@ -325,10 +325,16 @@ Client → API Gateway → Coordinator
 - **Lock Mechanism**: Redis SETNX for distributed locks
 
 ### 6.6 Infrastructure
-- Container orchestration (Kubernetes, Docker Swarm)
-- Service discovery
-- Load balancing
-- Monitoring and observability (Prometheus, Grafana)
+- **Container Orchestration**: Kubernetes (K8s)
+  - StatefulSets for storage nodes (persistent volumes)
+  - Deployments for coordinators (stateless, HPA enabled)
+  - Services for load balancing and service discovery
+- **Service Discovery**: Kubernetes DNS and service discovery
+- **Load Balancing**: Kubernetes Service (ClusterIP/LoadBalancer) and Ingress
+- **Monitoring and Observability**: 
+  - Prometheus for metrics collection
+  - Grafana for visualization
+  - Gossip protocol for storage node health checks
 
 ## 7. Scalability Considerations (Simplified for Decent Scale)
 
@@ -433,7 +439,121 @@ Client → API Gateway → Coordinator
 - **Solution**: Retry logic to reach quorum
 - **Store Idempotency**: Only store idempotency key after quorum reached
 
-## 9. Next Steps
+## 9. Monitoring and Observability
+
+### 9.1 Health Checks
+
+**Storage Node Health Checks**:
+- **Gossip Protocol**: Storage nodes use gossip protocol for health checks
+- **Peer-to-Peer Communication**: Nodes exchange health status with peers
+- **Failure Detection**: Fast detection of node failures through gossip
+- **Health Status Propagation**: Health status propagates through gossip network
+- **Benefits**: 
+  - Decentralized health monitoring
+  - Fast failure detection
+  - No single point of failure
+  - Self-organizing network
+
+**Gossip Protocol Implementation**:
+- Nodes periodically exchange health status with random peers
+- Health status includes: node_id, status (healthy/degraded/unhealthy), timestamp, metrics
+- Failed nodes are quickly identified and removed from routing
+- Coordinator nodes subscribe to gossip events for routing updates
+
+### 9.2 Metrics Collection
+
+- **QPS**: Requests per second per component
+- **Latency**: P50, P95, P99 percentiles
+- **Error Rates**: By error type and component
+- **Resource Usage**: CPU, memory, disk per node
+- **Cache Hit Rates**: For tenant config and idempotency stores
+- **Vector Clock Conflicts**: Conflict detection and repair rates
+- **Migration Progress**: For node additions/deletions
+
+### 9.3 Observability Stack
+
+- **Metrics**: Prometheus for metrics collection
+- **Visualization**: Grafana for dashboards
+- **Logging**: Centralized logging (ELK stack or similar)
+- **Tracing**: Distributed tracing for request flows (optional)
+
+## 10. Deployment Architecture
+
+### 10.1 Container Orchestration
+
+**Platform**: Kubernetes (K8s)
+
+**Deployment Strategy**:
+- **API Gateway**: Kubernetes Deployment with HorizontalPodAutoscaler (HPA)
+- **Coordinators**: Kubernetes Deployment (stateless, HPA enabled)
+- **Storage Nodes**: Kubernetes StatefulSet (stateful, persistent volumes)
+- **Metadata Store**: PostgreSQL deployed as StatefulSet or managed service
+- **Idempotency Store**: Redis deployed as StatefulSet or managed service
+
+### 10.2 Kubernetes Resources
+
+**StatefulSets for Storage Nodes**:
+- Persistent volumes for commit logs and SSTables
+- Stable network identities (headless service)
+- Ordered deployment and scaling
+- Pod disruption budgets for availability
+
+**Deployments for Coordinators**:
+- Stateless pods, can scale horizontally
+- Service for load balancing
+- ConfigMaps for configuration
+- Secrets for database credentials
+
+**Services**:
+- ClusterIP services for internal communication
+- LoadBalancer or Ingress for external API Gateway access
+
+### 10.3 Configuration Management
+
+- **ConfigMaps**: For non-sensitive configuration (cache sizes, TTLs, etc.)
+- **Secrets**: For sensitive data (database passwords, API keys)
+- **Environment Variables**: For runtime configuration
+
+## 11. Implementation TODO List
+
+The following items are planned for future implementation:
+
+### 11.1 Tenant Data Migration Strategy
+
+- [ ] Detailed design for tenant data migration during replication factor changes
+- [ ] Migration API specifications
+- [ ] Migration progress tracking and resumability
+- [ ] Migration rollback mechanisms
+- [ ] Performance optimization for large tenant migrations
+
+### 11.2 Security and Encryption
+
+- [ ] Tenant data isolation implementation details
+- [ ] Encryption at rest for commit logs and SSTables
+- [ ] Encryption in transit (TLS) for all communications
+- [ ] Key management system integration
+- [ ] Access control and authorization policies
+- [ ] Audit logging for security events
+
+### 11.3 Backup and Disaster Recovery
+
+- [ ] Backup strategy for storage nodes
+- [ ] Backup frequency and retention policies
+- [ ] Point-in-time recovery mechanisms
+- [ ] Disaster recovery procedures
+- [ ] Cross-region backup replication
+- [ ] Backup verification and testing procedures
+
+### 11.4 Cross-Datacenter Replication
+
+- [ ] Commit log replication for cross-datacenter replication
+- [ ] Multi-datacenter deployment architecture
+- [ ] Data synchronization strategies
+- [ ] Conflict resolution across datacenters
+- [ ] Network partition handling
+- [ ] Latency optimization for cross-DC operations
+
+## 12. Next Steps
 
 Detailed design documents for:
 - API Contracts (see `api-contracts.md`)

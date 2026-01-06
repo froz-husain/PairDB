@@ -78,7 +78,15 @@ The Coordinator service is a stateless microservice that handles request routing
 - Detect conflicts using vector clock comparison
 - Trigger repair operations when conflicts detected
 - Use last-write-wins strategy (simplified for decent scale)
+- **Repair Mechanism**: Asynchronous - repairs are triggered in background without blocking the request
+  - Conflict detected during read operation
+  - Repair request added to repair queue
+  - Background worker processes repair queue
+  - Repair writes sent to all replicas asynchronously
+  - Original read request returns immediately (may return slightly stale data)
 - Coordinate repair writes to all replicas
+- Repair queue for managing multiple repair operations
+- Repair retry logic for failed repairs
 
 #### 3.2.8 Response Aggregator
 - Aggregate responses from multiple replicas
@@ -175,11 +183,15 @@ The Coordinator processes requests forwarded from the API Gateway:
 ## 5. Data Stores Used
 
 ### 5.1 Metadata Store (PostgreSQL)
+
 - **Purpose**: Store tenant configurations
+- **Implementation**: Direct database access by coordinator nodes (no separate service for now)
+- **Future**: Can be moved to a separate service if needed for better scalability
 - **Tables**:
   - `tenants`: tenant_id, replication_factor, created_at, updated_at
 - **Access Pattern**: Read-heavy, occasional writes
 - **Caching**: Redis cache at coordinator level (TTL: 5 minutes)
+- **Connection**: Each coordinator maintains its own PostgreSQL connection pool
 
 ### 5.2 Idempotency Store (Redis)
 - **Purpose**: Store idempotency keys and responses
@@ -202,13 +214,66 @@ The Coordinator processes requests forwarded from the API Gateway:
 - Key format: `hash(tenant_id + key)`
 - Replica selection: N consecutive nodes on ring (N = replication factor)
 
-### 6.2 Vector Clock Comparison
+### 6.2 Vector Clock Implementation
+
+#### 6.2.1 Vector Clock Storage Format
+
+Vector clocks are stored as a list of `{coordinator_node_id, logical_timestamp}` pairs:
+
+```go
+type VectorClockEntry struct {
+    CoordinatorNodeID string
+    LogicalTimestamp  int64
+}
+
+type VectorClock []VectorClockEntry
+```
+
+**Example**:
+```go
+vectorClock := VectorClock{
+    {CoordinatorNodeID: "coord-1", LogicalTimestamp: 5},
+    {CoordinatorNodeID: "coord-2", LogicalTimestamp: 3},
+    {CoordinatorNodeID: "coord-3", LogicalTimestamp: 2},
+}
+```
+
+**Storage**:
+- Serialized as JSON or binary format
+- Stored with each key-value pair
+- Transmitted in API requests/responses
+
+#### 6.2.2 Vector Clock Comparison
+
 - Compare vector clocks from multiple replicas
 - Determine if clocks are:
-  - Identical: Same values
-  - Causal: One happens before the other
-  - Concurrent: Siblings (conflict)
+  - **Identical**: All entries match
+  - **Causal**: One happens before the other (all timestamps in one are <= corresponding timestamps in other)
+  - **Concurrent**: Siblings (conflict) - neither happens before the other
 - For concurrent clocks: Use last-write-wins (timestamp-based)
+
+**Comparison Algorithm**:
+```go
+func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
+    // Check if identical
+    if areIdentical(vc1, vc2) {
+        return Identical
+    }
+    
+    // Check if vc1 happens before vc2
+    if happensBefore(vc1, vc2) {
+        return Causal // vc1 -> vc2
+    }
+    
+    // Check if vc2 happens before vc1
+    if happensBefore(vc2, vc1) {
+        return Causal // vc2 -> vc1
+    }
+    
+    // Otherwise, concurrent
+    return Concurrent
+}
+```
 
 ### 6.3 Quorum Calculation
 - For replication factor N:
@@ -289,21 +354,35 @@ The Coordinator processes requests forwarded from the API Gateway:
 
 ### 11.1 Containerization
 - Docker container with coordinator service
-- Health check endpoints
+- Health check endpoints (for Kubernetes liveness/readiness probes)
 - Graceful shutdown handling
 
 ### 11.2 Orchestration
-- Kubernetes deployment (or similar)
-- Horizontal Pod Autoscaler (HPA)
-- Service discovery for storage nodes
+
+**Kubernetes Deployment**:
+- **Deployment**: Used for coordinators (stateless, horizontally scalable)
+  - Multiple replicas for high availability
+  - Horizontal Pod Autoscaler (HPA) for automatic scaling
+  - Service for load balancing (ClusterIP or LoadBalancer)
+- **Service Discovery**: Kubernetes DNS and service discovery for storage nodes
+- **Resource Limits**: CPU and memory limits per pod
+- **Health Probes**:
+  - Liveness probe: Health check endpoint
+  - Readiness probe: Check connections to storage nodes, metadata store, idempotency store
 
 ### 11.3 Configuration
-- Environment variables for:
-  - Metadata store connection string
-  - Redis connection string
-  - Storage node endpoints
-  - Cache TTLs
+- **ConfigMaps**: For non-sensitive configuration
+  - Metadata store connection string (PostgreSQL - direct DB access)
+  - Redis connection string (idempotency store)
+  - Storage node endpoints (or service discovery)
+  - Cache TTLs (tenant config cache: 5 minutes)
   - Consistency level defaults
+  - Gossip protocol subscription settings (for storage node health)
+- **Secrets**: For sensitive data
+  - Database passwords
+  - Redis passwords
+  - API keys
+- **Environment Variables**: For runtime configuration overrides
 
 ## 12. Storage Node Lifecycle Management
 
