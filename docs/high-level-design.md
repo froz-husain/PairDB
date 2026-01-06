@@ -52,7 +52,7 @@ graph TD
     StorageNode3[Storage Node 3<br/>Commit Log<br/>Cache/MemTable<br/>SSTables]
     
     Client -->|HTTP/REST| Gateway
-    Gateway -->|Route Request| Coord
+    Gateway -->|gRPC| Coord
     
     Coord -->|Fetch Tenant Config| RedisCache
     RedisCache -->|Cache Miss| PostgreSQL
@@ -66,9 +66,9 @@ graph TD
     HashRing -->|Route to Replicas| StorageNode2
     HashRing -->|Route to Replicas| StorageNode3
     
-    Coord -->|Read/Write/Repair| StorageNode1
-    Coord -->|Read/Write/Repair| StorageNode2
-    Coord -->|Read/Write/Repair| StorageNode3
+    Coord -->|gRPC<br/>Read/Write/Repair| StorageNode1
+    Coord -->|gRPC<br/>Read/Write/Repair| StorageNode2
+    Coord -->|gRPC<br/>Read/Write/Repair| StorageNode3
     
     StorageNode1 -->|Response| Coord
     StorageNode2 -->|Response| Coord
@@ -198,16 +198,22 @@ Client → API Gateway → Coordinator
 
 #### 3.3.1 API Gateway
 - **Purpose**: Entry point for all client requests
+- **Protocol**: HTTP server exposing all public APIs
 - **Responsibilities**:
   - Authentication and authorization
   - Rate limiting (per tenant)
   - Request routing to coordinators
   - Load balancing across coordinators
+  - HTTP to gRPC conversion (converts HTTP requests to gRPC for coordinators)
 - **Characteristics**: Stateless, horizontally scalable
 - **Technology**: HTTP/REST API gateway (e.g., Kong, Envoy, or custom gateway)
+- **Communication**: 
+  - Receives: HTTP/REST requests from clients
+  - Sends: gRPC requests to coordinator services (HTTP-to-gRPC gateway)
 
 #### 3.3.2 Coordinator Servers
 - **Purpose**: Handle QPS and route requests to appropriate storage nodes
+- **Protocol**: gRPC service (server)
 - **Responsibilities**:
   - Extract tenant ID and fetch tenant configuration
   - Determine replica nodes using consistent hashing
@@ -216,13 +222,19 @@ Client → API Gateway → Coordinator
   - Trigger repair operations when conflicts detected
   - Compare vector clocks and resolve conflicts
 - **Characteristics**: Stateless, horizontally scalable, can scale up/down dynamically
-- **Technology**: HTTP/gRPC service (stateless microservice)
+- **Technology**: gRPC microservice (stateless)
+- **Communication**:
+  - Receives: gRPC requests from API Gateway (HTTP-to-gRPC conversion)
+  - Sends: gRPC requests to Storage Nodes
+  - Direct DB access: PostgreSQL (metadata store)
+  - Direct access: Redis (idempotency store)
 - **Databases Used**:
-  - **Metadata Store**: PostgreSQL or Redis for tenant configurations (with caching)
+  - **Metadata Store**: PostgreSQL for tenant configurations (with caching)
   - **Idempotency Store**: Redis for idempotency key storage (fast lookup, TTL support)
 
 #### 3.3.3 Storage Nodes
 - **Purpose**: Store and serve key-value data
+- **Protocol**: gRPC service (server)
 - **Responsibilities**:
   - Store tenant-specific key-value pairs with vector clocks
   - Handle read/write operations with tenant isolation
@@ -230,14 +242,16 @@ Client → API Gateway → Coordinator
   - Write all mutations to commit log first
   - Participate in replication and consistency protocols
 - **Characteristics**: Stateful, distributed on consistent hash ring, tenant-aware storage
-- **Technology**: Custom storage engine with:
+- **Technology**: Custom storage engine with gRPC interface
+- **Communication**:
+  - Receives: gRPC requests from Coordinators
+  - Local: File system for commit logs and SSTables
+  - Gossip Protocol: Peer-to-peer communication with other storage nodes for health checks
+- **Storage Components**:
   - **Commit Log**: Append-only log files on disk
-  - **In-Memory Cache**: LRU/LFU cache for frequently accessed keys
+  - **In-Memory Cache**: Adaptive cache (LRU + LFU) for frequently accessed keys
   - **MemTable**: In-memory sorted table for recent writes
-  - **SSTables**: Immutable sorted string tables on disk
-- **Databases Used**: 
-  - Local file system for commit logs and SSTables
-  - In-memory data structures for cache and memtable
+  - **SSTables**: Immutable sorted string tables on disk (level-based compaction)
 
 #### 3.3.4 Metadata Store
 - **Purpose**: Store tenant configurations and metadata
@@ -302,19 +316,41 @@ Client → API Gateway → Coordinator
 ## 6. Technology Stack Summary
 
 ### 6.1 API Gateway
-- HTTP/REST API gateway (Kong, Envoy, or custom)
-- JWT-based authentication
-- Rate limiting middleware
+- **Protocol**: HTTP server exposing all public APIs
+- **Technology**: HTTP server (Kong, Envoy, or custom)
+- **Responsibilities**: 
+  - Expose REST APIs to clients
+  - Authentication and authorization
+  - Rate limiting middleware
+  - Request routing to coordinator nodes
+- **Communication**: HTTP requests to coordinator gRPC service (via HTTP-to-gRPC gateway or direct gRPC)
 
 ### 6.2 Coordinator Service
-- HTTP/gRPC microservice (stateless)
-- Language: Go, Java, or Python
-- Connection pooling to storage nodes
+- **Protocol**: gRPC service (server)
+- **Technology**: gRPC microservice (stateless)
+- **Language**: Go, Java, or Python (recommended: Go)
+- **Responsibilities**:
+  - Receive requests from API Gateway (via gRPC)
+  - Process and route to storage nodes (via gRPC)
+  - Handle consistency coordination
+- **Communication**: 
+  - Receives: gRPC requests from API Gateway
+  - Sends: gRPC requests to Storage Nodes
+  - Direct DB access: PostgreSQL (metadata store)
+  - Direct access: Redis (idempotency store)
 
 ### 6.3 Storage Node
-- Custom storage engine
-- File system for commit logs and SSTables
-- In-memory data structures (cache, memtable)
+- **Protocol**: gRPC service (server)
+- **Technology**: Custom storage engine with gRPC interface
+- **Language**: Go, C++, or Rust (recommended: Go)
+- **Responsibilities**:
+  - Receive gRPC requests from coordinators
+  - Store and retrieve key-value data
+  - Manage multi-layer storage (commit log, cache, memtable, SSTables)
+- **Communication**: 
+  - Receives: gRPC requests from Coordinators
+  - Local: File system for commit logs and SSTables
+  - Gossip Protocol: Peer-to-peer health checks with other storage nodes
 
 ### 6.4 Metadata Store
 - **Primary**: PostgreSQL (persistent, ACID-compliant)
@@ -557,6 +593,6 @@ The following items are planned for future implementation:
 
 Detailed design documents for:
 - API Contracts (see `api-contracts.md`)
-- Coordinator Design (see `CoordinatorNodeDesign/coordinator-design.md`)
-- Storage Node Design (see `storageNodeDesign/storage-node-design.md`)
+- Coordinator Design (see `coordinator/design.md`)
+- Storage Node Design (see `storage-node/design.md`)
 

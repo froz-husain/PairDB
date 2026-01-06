@@ -26,14 +26,14 @@ The Coordinator service is a stateless microservice that handles request routing
 ## 3. Service Architecture
 
 ### 3.1 Service Type
-- **Protocol**: HTTP/gRPC microservice
+- **Protocol**: gRPC service (server)
 - **Deployment**: Stateless, horizontally scalable
 - **Language**: Go, Java, or Python (recommended: Go for performance)
-- **Communication**: 
-  - With API Gateway: HTTP/REST
-  - With Storage Nodes: gRPC or HTTP (for better performance)
-  - With Metadata Store: Database client (PostgreSQL)
-  - With Idempotency Store: Redis client
+- **Network Communication**:
+  - **Receives from API Gateway**: gRPC requests (API Gateway converts HTTP to gRPC)
+  - **Sends to Storage Nodes**: gRPC requests
+  - **Metadata Store**: Direct PostgreSQL database client connection
+  - **Idempotency Store**: Direct Redis client connection
 
 ### 3.2 Component Responsibilities
 
@@ -94,93 +94,118 @@ The Coordinator service is a stateless microservice that handles request routing
 - Handle partial failures (quorum not reached)
 - Format response for client
 
-## 4. APIs Offered by Coordinator
+## 4. Core Entities
 
-### 4.1 Internal APIs (gRPC/HTTP)
-
-The Coordinator exposes internal APIs for communication with Storage Nodes:
-
-#### 4.1.1 Write Request
-```
-rpc Write(WriteRequest) returns (WriteResponse)
-```
-
-**Request**:
-```protobuf
-message WriteRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  map<string, int64> vector_clock = 4;
-  string idempotency_key = 5;
+### 4.1 Tenant Configuration
+```go
+type TenantConfig struct {
+    TenantID         string
+    ReplicationFactor int
+    CreatedAt        time.Time
+    UpdatedAt        time.Time
+    Version          int64  // For optimistic locking
 }
 ```
 
-**Response**:
-```protobuf
-message WriteResponse {
-  bool success = 1;
-  map<string, int64> vector_clock = 2;
-  string error_message = 3;
+### 4.2 Vector Clock
+```go
+type VectorClockEntry struct {
+    CoordinatorNodeID string
+    LogicalTimestamp   int64
+}
+
+type VectorClock []VectorClockEntry
+```
+
+### 4.3 Hash Ring State
+```go
+type HashRingState struct {
+    Nodes        []NodeInfo
+    VirtualNodes map[string][]VirtualNode
+    LastUpdated  time.Time
+}
+
+type NodeInfo struct {
+    NodeID       string
+    Host         string
+    Port         int
+    Status       string  // "active", "draining", "inactive"
+    VirtualNodes int
+}
+
+type VirtualNode struct {
+    VNodeID string
+    Hash    uint64
+    NodeID  string
 }
 ```
 
-#### 4.1.2 Read Request
-```
-rpc Read(ReadRequest) returns (ReadResponse)
-```
+### 4.4 Migration State
+```go
+type MigrationState struct {
+    MigrationID  string
+    Type         string  // "node_addition" or "node_deletion"
+    NodeID       string
+    Status       string  // "pending", "in_progress", "completed", "failed"
+    Phase        string  // "dual-write", "data-copy", "cutover", "cleanup"
+    Progress     MigrationProgress
+    StartedAt    time.Time
+    CompletedAt  *time.Time
+}
 
-**Request**:
-```protobuf
-message ReadRequest {
-  string tenant_id = 1;
-  string key = 2;
+type MigrationProgress struct {
+    KeysMigrated int64
+    TotalKeys    int64
+    Percentage   float64
 }
 ```
 
-**Response**:
-```protobuf
-message ReadResponse {
-  bool success = 1;
-  bytes value = 2;
-  map<string, int64> vector_clock = 3;
-  string error_message = 4;
+### 4.5 Repair Request
+```go
+type RepairRequest struct {
+    TenantID    string
+    Key         string
+    Value       []byte
+    VectorClock VectorClock
+    Timestamp   int64
 }
 ```
 
-#### 4.1.3 Repair Request
-```
-rpc Repair(RepairRequest) returns (RepairResponse)
-```
-
-**Request**:
-```protobuf
-message RepairRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  map<string, int64> vector_clock = 4;
+### 4.6 Idempotency Key
+```go
+type IdempotencyKey struct {
+    TenantID       string
+    Key            string
+    IdempotencyKey string
+    Response       []byte  // Serialized response
+    Timestamp      time.Time
+    TTL            time.Duration
 }
 ```
 
-**Response**:
-```protobuf
-message RepairResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-```
+## 5. APIs Offered by Coordinator
 
-### 4.2 External APIs (via API Gateway)
+**Note**: Detailed API contracts are documented in `api-contracts.md` in this directory.
 
-The Coordinator processes requests forwarded from the API Gateway:
-- POST /v1/key-value
-- GET /v1/key-value
-- POST /v1/tenants
-- PUT /v1/tenants/{tenant_id}/replication-factor
-- GET /v1/tenants/{tenant_id}
+### 5.1 gRPC Service APIs (Internal)
 
-## 5. Data Stores Used
+The Coordinator exposes gRPC service APIs for communication with Storage Nodes. See `api-contracts.md` for complete protobuf definitions.
+
+**Key gRPC Methods**:
+- `Write(WriteRequest) returns (WriteResponse)` - Write key-value pair to storage node
+- `Read(ReadRequest) returns (ReadResponse)` - Read key-value pair from storage node
+- `Repair(RepairRequest) returns (RepairResponse)` - Repair conflicting data on storage node
+
+### 5.2 External APIs (via API Gateway)
+
+The Coordinator processes gRPC requests forwarded from the API Gateway (which converts HTTP to gRPC):
+- POST /v1/key-value → gRPC Write
+- GET /v1/key-value → gRPC Read
+- POST /v1/tenants → Tenant creation
+- PUT /v1/tenants/{tenant_id}/replication-factor → Replication factor update
+- GET /v1/tenants/{tenant_id} → Tenant configuration retrieval
+
+## 6. Data Stores Used
 
 ### 5.1 Metadata Store (PostgreSQL)
 
@@ -206,7 +231,7 @@ The Coordinator processes requests forwarded from the API Gateway:
 - **PostgreSQL**: Connection pool for metadata store queries
 - **Redis**: Connection pool for idempotency store operations
 
-## 6. Key Algorithms
+## 7. Key Algorithms
 
 ### 6.1 Consistent Hashing
 - Hash function: SHA-256
@@ -280,7 +305,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
   - Quorum = (N / 2) + 1
   - Example: N=3, Quorum=2; N=5, Quorum=3
 
-## 7. Error Handling
+## 8. Error Handling
 
 ### 7.1 Storage Node Failures
 - Retry failed requests to other replicas
@@ -297,7 +322,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
 - Fallback to vector clocks for conflict detection
 - Circuit breaker pattern for repeated failures
 
-## 8. Performance Optimizations
+## 9. Performance Optimizations
 
 ### 8.1 Caching
 - **Tenant Configurations**: Redis cache with 5-minute TTL
@@ -313,7 +338,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
 - Batch metadata store queries when possible
 - Batch idempotency store operations (pipeline)
 
-## 9. Monitoring and Observability
+## 10. Monitoring and Observability
 
 ### 9.1 Metrics
 - Request rate (QPS) per coordinator
@@ -333,7 +358,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
 - Liveness probe: Basic health check endpoint
 - Readiness probe: Check connections to storage nodes, metadata store, idempotency store
 
-## 10. Scalability Considerations
+## 11. Scalability Considerations
 
 ### 10.1 Horizontal Scaling
 - Stateless design allows easy horizontal scaling
@@ -350,7 +375,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
 - Request latency p95 > 100ms
 - Error rate > 1%
 
-## 11. Deployment
+## 12. Deployment
 
 ### 11.1 Containerization
 - Docker container with coordinator service
@@ -384,7 +409,7 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
   - API keys
 - **Environment Variables**: For runtime configuration overrides
 
-## 12. Storage Node Lifecycle Management
+## 13. Storage Node Lifecycle Management
 
 ### 12.1 Overview
 

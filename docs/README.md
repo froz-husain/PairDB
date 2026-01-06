@@ -24,7 +24,7 @@ Complete API specifications including:
 - Consistency levels
 - Examples
 
-### 4. [Coordinator Design](CoordinatorNodeDesign/coordinator-design.md)
+### 4. [Coordinator Design](coordinator/design.md)
 High-level design for the Coordinator service:
 - Requirements
 - Service architecture
@@ -34,7 +34,7 @@ High-level design for the Coordinator service:
 - Performance optimizations
 - Deployment considerations
 
-### 5. [Storage Node Design](storageNodeDesign/storage-node-design.md)
+### 5. [Storage Node Design](storage-node/design.md)
 High-level design for the Storage Node service:
 - Requirements
 - Service architecture

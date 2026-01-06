@@ -25,12 +25,13 @@ The Storage Node is a stateful service that stores and serves key-value data. It
 ## 3. Service Architecture
 
 ### 3.1 Service Type
-- **Protocol**: gRPC/HTTP service
+- **Protocol**: gRPC service (server)
 - **Deployment**: Stateful, one instance per physical/virtual node
 - **Language**: Go, C++, or Rust (recommended: Go for development speed, C++/Rust for performance)
-- **Communication**: 
-  - With Coordinators: gRPC or HTTP
-  - Local: File system for commit logs and SSTables
+- **Network Communication**:
+  - **Receives from Coordinators**: gRPC requests
+  - **Gossip Protocol**: Peer-to-peer communication with other storage nodes for health checks
+  - **Local**: File system for commit logs and SSTables
 
 ### 3.2 Component Responsibilities
 
@@ -79,242 +80,108 @@ The Storage Node is a stateful service that stores and serves key-value data. It
 - Validate tenant_id on all operations
 - Separate data structures per tenant (logical separation)
 
-## 4. APIs Offered by Storage Node
+## 4. Core Entities
 
-### 4.1 Write API
+### 4.1 Key-Value Entry
+```go
+type VectorClockEntry struct {
+    CoordinatorNodeID string
+    LogicalTimestamp   int64
+}
 
-**Endpoint**: `Write(WriteRequest) returns (WriteResponse)`
+type VectorClock []VectorClockEntry
 
-**Request**:
-```protobuf
-message WriteRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  map<string, int64> vector_clock = 4;
-  string idempotency_key = 5;  // Optional, for logging
+type KeyValueEntry struct {
+    TenantID    string
+    Key         string
+    Value       []byte
+    VectorClock VectorClock  // List of {coordinator_node_id, logical_timestamp}
+    Timestamp   int64
 }
 ```
 
-**Response**:
-```protobuf
-message WriteResponse {
-  bool success = 1;
-  map<string, int64> updated_vector_clock = 2;
-  string error_message = 3;
+### 4.2 Commit Log Entry
+```go
+type CommitLogEntry struct {
+    TenantID     string
+    Key          string
+    Value        []byte
+    VectorClock  VectorClock
+    Timestamp    int64
+    OperationType string  // "write", "repair", "delete"
 }
 ```
 
-**Write Flow**:
-1. Validate tenant_id and key
-2. Write to commit log (append-only)
-3. Update memtable
-4. Update cache (if key exists in cache)
-5. Update vector clock
-6. Return success
-
-### 4.2 Read API
-
-**Endpoint**: `Read(ReadRequest) returns (ReadResponse)`
-
-**Request**:
-```protobuf
-message ReadRequest {
-  string tenant_id = 1;
-  string key = 2;
+### 4.3 MemTable Entry
+```go
+type MemTableEntry struct {
+    Key         string  // Format: "{tenant_id}:{key}"
+    Value       []byte
+    VectorClock VectorClock
+    Timestamp   int64
 }
 ```
 
-**Response**:
-```protobuf
-message ReadResponse {
-  bool success = 1;
-  bytes value = 2;
-  map<string, int64> vector_clock = 3;
-  string error_message = 4;
+### 4.4 SSTable Metadata
+```go
+type SSTableMetadata struct {
+    SSTableID   string
+    TenantID    string
+    Level       int      // L0, L1, L2, etc.
+    Size        int64    // Size in bytes
+    KeyRange    KeyRange
+    CreatedAt   time.Time
+    FilePath    string
+}
+
+type KeyRange struct {
+    StartKey string
+    EndKey   string
 }
 ```
 
-**Read Flow**:
-1. Validate tenant_id and key
-2. Check cache (if hit, return)
-3. Check memtable (if found, return and update cache)
-4. Search SSTables (check multiple SSTables, return latest version)
-5. Compare versions, check siblings
-6. Return value and vector clock
-
-### 4.3 Repair API
-
-**Endpoint**: `Repair(RepairRequest) returns (RepairResponse)`
-
-**Request**:
-```protobuf
-message RepairRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  map<string, int64> vector_clock = 4;
+### 4.5 Cache Entry
+```go
+type CacheEntry struct {
+    Key         string  // Format: "{tenant_id}:{key}"
+    Value       []byte
+    VectorClock VectorClock
+    AccessCount int64      // For LFU component
+    LastAccess  time.Time   // For LRU component
+    Score       float64     // Adaptive score for eviction
 }
 ```
 
-**Response**:
-```protobuf
-message RepairResponse {
-  bool success = 1;
-  string error_message = 2;
+### 4.6 Health Status (for Gossip Protocol)
+```go
+type HealthStatus struct {
+    NodeID    string
+    Status    string  // "healthy", "degraded", "unhealthy"
+    Timestamp int64
+    Metrics   map[string]float64  // cpu_usage, memory_usage, disk_usage, etc.
 }
 ```
 
-**Repair Flow**:
-1. Validate tenant_id and key
-2. Write to commit log
-3. Update memtable
-4. Update cache
-5. Update vector clock
-6. Return success
+## 5. APIs Offered by Storage Node
 
-### 4.4 Health Check API
+**Note**: Detailed API contracts are documented in `api-contracts.md` in this directory.
 
-**Endpoint**: `HealthCheck() returns (HealthResponse)`
+### 5.1 gRPC Service APIs
 
-**Response**:
-```protobuf
-message HealthResponse {
-  bool healthy = 1;
-  string status = 2;  // "healthy", "degraded", "unhealthy"
-  map<string, string> metrics = 3;  // disk_usage, memory_usage, etc.
-}
-```
+The Storage Node exposes gRPC service APIs for communication with Coordinators. See `api-contracts.md` for complete protobuf definitions.
 
-### 4.5 Migration APIs
+**Key gRPC Methods**:
+- `Write(WriteRequest) returns (WriteResponse)` - Write key-value pair
+- `Read(ReadRequest) returns (ReadResponse)` - Read key-value pair
+- `Repair(RepairRequest) returns (RepairResponse)` - Repair conflicting data
+- `ReplicateData(ReplicateRequest) returns (ReplicateResponse)` - Data replication for migration
+- `StreamKeys(StreamKeysRequest) returns (stream KeyValueEntry)` - Stream keys for migration
+- `GetKeyRange(KeyRangeRequest) returns (KeyRangeResponse)` - Get keys in range
+- `DrainNode(DrainRequest) returns (DrainResponse)` - Prepare node for removal
+- `HealthCheck() returns (HealthResponse)` - Health check endpoint
 
-Storage nodes participate in data migration when nodes are added or removed from the cluster.
 
-#### 4.5.1 Replicate Data API
-
-**Endpoint**: `ReplicateData(ReplicateRequest) returns (ReplicateResponse)`
-
-**Purpose**: Used by coordinator to copy data from one node to another during migration.
-
-**Request**:
-```protobuf
-message ReplicateRequest {
-  string tenant_id = 1;
-  string key_range_start = 2;  // Optional: for range-based replication
-  string key_range_end = 3;     // Optional: for range-based replication
-  repeated string keys = 4;     // Optional: specific keys to replicate
-  string target_node_id = 5;    // Node to replicate to
-  bool include_vector_clock = 6; // Include vector clocks in replication
-}
-```
-
-**Response**:
-```protobuf
-message ReplicateResponse {
-  bool success = 1;
-  int64 keys_replicated = 2;
-  string error_message = 3;
-}
-```
-
-**Replication Flow**:
-1. Coordinator calls ReplicateData on source node
-2. Source node reads keys from SSTables (and memtable if needed)
-3. Source node streams key-value pairs to coordinator
-4. Coordinator writes to target node
-5. Target node acknowledges writes
-
-#### 4.5.2 Stream Keys API
-
-**Endpoint**: `StreamKeys(StreamKeysRequest) returns (stream KeyValueEntry)`
-
-**Purpose**: Efficiently stream keys for migration (better for large datasets).
-
-**Request**:
-```protobuf
-message StreamKeysRequest {
-  string tenant_id = 1;
-  string key_range_start = 2;
-  string key_range_end = 3;
-  int32 batch_size = 4;  // Number of keys per batch
-}
-```
-
-**Response Stream**:
-```protobuf
-message KeyValueEntry {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  map<string, int64> vector_clock = 4;
-  int64 timestamp = 5;
-}
-```
-
-**Streaming Flow**:
-1. Coordinator initiates stream
-2. Storage node reads keys in batches
-3. Storage node streams batches to coordinator
-4. Coordinator writes batches to target node
-5. Process continues until all keys streamed
-
-#### 4.5.3 Get Key Range API
-
-**Endpoint**: `GetKeyRange(KeyRangeRequest) returns (KeyRangeResponse)`
-
-**Purpose**: Get list of keys in a specific range (for migration planning).
-
-**Request**:
-```protobuf
-message KeyRangeRequest {
-  string tenant_id = 1;
-  string key_range_start = 2;
-  string key_range_end = 3;
-  int32 max_keys = 4;  // Limit number of keys returned
-}
-```
-
-**Response**:
-```protobuf
-message KeyRangeResponse {
-  repeated string keys = 1;
-  bool has_more = 2;
-  string next_key = 3;  // For pagination
-}
-```
-
-#### 4.5.4 Drain Node API
-
-**Endpoint**: `DrainNode(DrainRequest) returns (DrainResponse)`
-
-**Purpose**: Prepare node for removal by stopping new writes and ensuring data is replicated.
-
-**Request**:
-```protobuf
-message DrainRequest {
-  bool graceful = 1;  // Wait for ongoing operations to complete
-  int32 timeout_seconds = 2;  // Timeout for graceful drain
-}
-```
-
-**Response**:
-```protobuf
-message DrainResponse {
-  bool success = 1;
-  string status = 2;  // "drained", "draining", "failed"
-  string error_message = 3;
-}
-```
-
-**Drain Flow**:
-1. Coordinator calls DrainNode
-2. Storage node stops accepting new writes
-3. Storage node completes ongoing operations
-4. Storage node verifies all data has been replicated
-5. Storage node returns "drained" status
-6. Node can be safely removed
-
-## 5. Storage Architecture
+## 6. Storage Architecture
 
 ### 5.1 Multi-Layer Storage
 
@@ -419,9 +286,9 @@ SSTables are organized into levels with increasing size thresholds:
 - Maintains sorted structure for efficient reads
 - Background process, doesn't block reads/writes
 
-## 6. Data Structures
+## 7. Data Structures
 
-### 6.1 Key-Value Entry
+### 7.1 Key-Value Entry
 ```go
 type VectorClockEntry struct {
     CoordinatorNodeID string
@@ -439,7 +306,7 @@ type KeyValueEntry struct {
 }
 ```
 
-### 6.2 Vector Clock
+### 7.2 Vector Clock
 
 - **Format**: List of `{coordinator_node_id, logical_timestamp}` pairs
 - **Data Structure**:
@@ -464,9 +331,9 @@ vectorClock := VectorClock{
 - **Storage**: Serialized as JSON or binary format with each key-value pair
 - **Comparison**: Compare entries by coordinator_node_id, then by logical_timestamp
 
-## 7. Key Operations
+## 8. Key Operations
 
-### 7.1 Write Operation
+### 8.1 Write Operation
 1. **Validate**: Check tenant_id and key format
 2. **Commit Log**: Append write to commit log (sync to disk)
 3. **MemTable**: Insert/update in memtable
@@ -474,7 +341,7 @@ vectorClock := VectorClock{
 5. **Vector Clock**: Update vector clock
 6. **Response**: Return success with updated vector clock
 
-### 7.2 Read Operation
+### 8.2 Read Operation
 1. **Validate**: Check tenant_id and key format
 2. **Cache**: Check cache (if hit, return)
 3. **MemTable**: Check memtable (if found, return and cache)
@@ -482,14 +349,14 @@ vectorClock := VectorClock{
 5. **Version Comparison**: Compare versions, handle siblings
 6. **Response**: Return value and vector clock
 
-### 7.3 MemTable Flush
+### 8.3 MemTable Flush
 1. **Trigger**: When memtable size exceeds threshold
 2. **Create SSTable**: Write memtable contents to new SSTable
 3. **Sort**: SSTable is already sorted (memtable is sorted)
 4. **Commit Log**: Truncate commit log (data now in SSTable)
 5. **Clear MemTable**: Create new empty memtable
 
-### 7.4 SSTable Compaction
+### 8.4 SSTable Compaction
 
 **Level-Based Compaction Process**:
 
@@ -515,9 +382,9 @@ vectorClock := VectorClock{
    - Throttled to avoid impacting normal operations
    - Prioritizes levels with most overlap or highest read amplification
 
-### 7.5 Migration Operations
+### 8.5 Migration Operations
 
-#### 7.5.1 Node Addition - Receiving Data
+#### 8.5.1 Node Addition - Receiving Data
 
 When a new node is added and data is being migrated to it:
 
@@ -526,7 +393,7 @@ When a new node is added and data is being migrated to it:
 3. **Bulk Data Reception**: For bulk migration, coordinator streams data
 4. **Verify Data**: After migration, node verifies data integrity
 
-#### 7.5.2 Node Deletion - Sending Data
+#### 8.5.2 Node Deletion - Sending Data
 
 When a node is being removed:
 
@@ -537,7 +404,7 @@ When a node is being removed:
 5. **Verify Replication**: Ensure all data has been copied to other nodes
 6. **Mark as Drained**: Return "drained" status to coordinator
 
-#### 7.5.3 Data Streaming for Migration
+#### 8.5.3 Data Streaming for Migration
 
 **Efficient Streaming**:
 - Read from SSTables in sorted order
@@ -571,59 +438,59 @@ func StreamKeys(tenantID string, keyRangeStart string, keyRangeEnd string) {
 }
 ```
 
-## 8. Tenant Isolation
+## 9. Tenant Isolation
 
-### 8.1 Logical Separation
+### 9.1 Logical Separation
 - All data structures include tenant_id
 - Keys are prefixed with tenant_id: `{tenant_id}:{key}`
 - Separate memtables per tenant (logical, not physical)
 - SSTables organized by tenant (directory structure)
 
-### 8.2 Validation
+### 9.2 Validation
 - Validate tenant_id on all operations
 - Reject operations with invalid tenant_id
 - Log cross-tenant access attempts
 
-## 9. Performance Optimizations
+## 10. Performance Optimizations
 
-### 9.1 Write Optimizations
+### 10.1 Write Optimizations
 - **Batch Writes**: Batch multiple writes before flushing to commit log
 - **Async Flush**: Don't block on commit log sync (optional, trade-off durability)
 - **MemTable Size**: Tune memtable size for write performance
 
-### 9.2 Read Optimizations
+### 10.2 Read Optimizations
 - **Cache**: Aggressive caching of frequently accessed keys
 - **SSTable Indexing**: Index SSTables for faster lookups
 - **Bloom Filters**: Use bloom filters to avoid unnecessary SSTable reads
 
-### 9.3 Compaction Optimizations
+### 10.3 Compaction Optimizations
 - **Background Compaction**: Don't block reads/writes
 - **Priority Compaction**: Prioritize compaction of frequently accessed SSTables
 - **Parallel Compaction**: Compact multiple SSTables in parallel
 
-## 10. Error Handling
+## 11. Error Handling
 
-### 10.1 Disk Failures
+### 11.1 Disk Failures
 - Detect disk failures
 - Mark node as unhealthy
 - Stop accepting writes (reads may continue from cache/memtable)
 - Alert monitoring system
 
-### 10.2 Memory Pressure
+### 11.2 Memory Pressure
 - Monitor memory usage
 - Aggressive cache eviction if memory pressure
 - Trigger memtable flush early if needed
 - Reject new writes if memory exhausted
 
-### 10.3 Corrupted Data
+### 11.3 Corrupted Data
 - Detect corrupted commit log entries
 - Skip corrupted entries during recovery
 - Log errors for manual intervention
 - Use checksums for data integrity
 
-## 11. Monitoring and Observability
+## 12. Monitoring and Observability
 
-### 11.1 Health Checks with Gossip Protocol
+### 12.1 Health Checks with Gossip Protocol
 
 **Gossip Protocol Implementation**:
 - Storage nodes use gossip protocol for peer-to-peer health monitoring
@@ -651,7 +518,7 @@ type HealthStatus struct {
 }
 ```
 
-### 11.2 Metrics
+### 12.2 Metrics
 - Write/read QPS
 - Latency percentiles (p50, p95, p99)
 - Cache hit rate
@@ -662,46 +529,46 @@ type HealthStatus struct {
 - Commit log size
 - Gossip protocol metrics (peer connections, health propagation time)
 
-### 11.3 Logging
+### 12.3 Logging
 - Write/read operations (with tenant_id, key)
 - Memtable flushes
 - SSTable compactions
 - Errors and exceptions
 - Gossip protocol events (peer connections, health status updates)
 
-### 11.4 Health Checks
+### 12.4 Health Checks
 - Disk space availability
 - Memory usage
 - Commit log health
 - SSTable integrity
 - Gossip protocol connectivity
 
-## 12. Scalability Considerations
+## 13. Scalability Considerations
 
-### 12.1 Storage Scale
+### 13.1 Storage Scale
 - Support terabytes per node
 - Efficient disk usage (compaction reduces space)
 - Monitor disk usage and alert on thresholds
 
-### 12.2 Performance Scale
+### 13.2 Performance Scale
 - Support thousands of reads/writes per second per node
 - Cache and memtable optimize for hot data
 - SSTables handle cold data efficiently
 
-### 12.3 Resource Requirements
+### 13.3 Resource Requirements
 - **CPU**: Moderate (compaction, SSTable searches)
 - **Memory**: High (cache, memtable)
 - **Disk**: High (commit logs, SSTables)
 - **Network**: Moderate (communication with coordinators)
 
-## 13. Deployment
+## 14. Deployment
 
-### 13.1 Containerization
+### 14.1 Containerization
 - Docker container with storage node service
 - Persistent volumes for commit logs and SSTables
 - Health check endpoints (for Kubernetes liveness/readiness probes)
 
-### 13.2 Orchestration
+### 14.2 Orchestration
 
 **Kubernetes Deployment**:
 - **StatefulSet**: Used for storage nodes (stateful, persistent storage)
@@ -715,7 +582,7 @@ type HealthStatus struct {
   - Liveness probe: Health check endpoint
   - Readiness probe: Check if node can accept requests
 
-### 13.3 Configuration
+### 14.3 Configuration
 - **ConfigMaps**: For non-sensitive configuration
   - Data directory paths
   - Cache size
