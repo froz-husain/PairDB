@@ -1,4 +1,4 @@
-# pairDB Documentation
+# PairDB Documentation
 
 This directory contains the high-level design documentation for pairDB, a distributed key-value store.
 
