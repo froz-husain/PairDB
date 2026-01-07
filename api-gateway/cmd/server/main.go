@@ -137,14 +137,14 @@ func initLogger() *zap.Logger {
 
 	// Get log format from environment
 	logFormat := os.Getenv("LOG_FORMAT")
-	
+
 	var config zap.Config
 	if logFormat == "console" {
 		config = zap.NewDevelopmentConfig()
 	} else {
 		config = zap.NewProductionConfig()
 	}
-	
+
 	config.Level = zap.NewAtomicLevelAt(level)
 	config.OutputPaths = []string{"stdout"}
 	config.ErrorOutputPaths = []string{"stderr"}
@@ -157,4 +157,3 @@ func initLogger() *zap.Logger {
 
 	return logger
 }
-

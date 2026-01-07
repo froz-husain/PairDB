@@ -121,7 +121,7 @@ func (s *CoordinatorService) WriteKeyValue(
 	}
 
 	// Get replica nodes
-	replicas, err := s.routingService.GetReplicas(tenantID, key, tenant.ReplicationFactor)
+	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas: %w", err)
 	}
@@ -172,7 +172,7 @@ func (s *CoordinatorService) ReadKeyValue(
 	}
 
 	// Get replica nodes
-	replicas, err := s.routingService.GetReplicas(tenantID, key, tenant.ReplicationFactor)
+	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get replicas: %w", err)
 	}

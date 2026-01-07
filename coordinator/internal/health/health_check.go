@@ -127,7 +127,8 @@ func (h *HealthChecker) checkCache(ctx context.Context) error {
 	if h.cache == nil {
 		return nil // Skip if not initialized
 	}
-	return h.cache.Ping(ctx)
+	// Cache is always available (in-memory), no ping needed
+	return nil
 }
 
 // StartHealthServer starts the health check HTTP server

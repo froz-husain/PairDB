@@ -239,8 +239,9 @@ func (s *PostgresMetadataStore) GetMigration(ctx context.Context, migrationID st
 		return nil, fmt.Errorf("failed to get migration: %w", err)
 	}
 
-	migration.Type = migrationType
-	migration.Status = status
+	migration.Type = model.MigrationType(migrationType)
+	migration.Status = model.MigrationStatus(status)
+	migration.Phase = model.MigrationPhase(phase)
 
 	return &migration, nil
 }

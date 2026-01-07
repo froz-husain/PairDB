@@ -39,7 +39,7 @@ const (
 	OperationTypeWrite  OperationType = "write"
 	OperationTypeRepair OperationType = "repair"
 	OperationTypeDelete OperationType = "delete"
-}
+)
 
 // MemTableEntry represents an entry in the memtable
 type MemTableEntry struct {

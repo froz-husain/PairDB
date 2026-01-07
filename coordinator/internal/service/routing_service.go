@@ -15,7 +15,7 @@ import (
 // RoutingService manages consistent hashing and replica routing
 type RoutingService struct {
 	metadataStore store.MetadataStore
-	hashRing      *algorithm.ConsistentHash
+	hashRing      *algorithm.ConsistentHasher
 	mu            sync.RWMutex
 	updateTicker  *time.Ticker
 	stopCh        chan struct{}
@@ -31,7 +31,7 @@ func NewRoutingService(
 ) *RoutingService {
 	rs := &RoutingService{
 		metadataStore: metadataStore,
-		hashRing:      algorithm.NewConsistentHash(virtualNodes),
+		hashRing:      algorithm.NewConsistentHasher(),
 		updateTicker:  time.NewTicker(updateInterval),
 		stopCh:        make(chan struct{}),
 		logger:        logger,
@@ -44,25 +44,39 @@ func NewRoutingService(
 }
 
 // GetReplicas returns the storage nodes for the given tenant and key
-func (s *RoutingService) GetReplicas(tenantID, key string, replicationFactor int) ([]*model.StorageNode, error) {
+func (s *RoutingService) GetReplicas(ctx context.Context, tenantID, key string, replicationFactor int) ([]*model.StorageNode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	// Create composite key for consistent hashing
 	compositeKey := fmt.Sprintf("%s:%s", tenantID, key)
 
-	// Get nodes from hash ring
-	nodeIDs := s.hashRing.GetNodes(compositeKey, replicationFactor)
-	if len(nodeIDs) < replicationFactor {
-		return nil, fmt.Errorf("insufficient storage nodes: need %d, got %d", replicationFactor, len(nodeIDs))
+	// Hash the key and get virtual nodes from hash ring
+	keyHash := s.hashRing.Hash(compositeKey)
+	vnodes := s.hashRing.GetNodes(keyHash, replicationFactor)
+	if len(vnodes) < replicationFactor {
+		return nil, fmt.Errorf("insufficient storage nodes: need %d, got %d", replicationFactor, len(vnodes))
 	}
 
-	// Get node details from hash ring
-	nodes := make([]*model.StorageNode, 0, len(nodeIDs))
-	for _, nodeID := range nodeIDs {
-		node := s.hashRing.GetNodeByID(nodeID)
-		if node != nil {
-			nodes = append(nodes, node)
+	// Convert virtual nodes to storage nodes (fetch from metadata store)
+	nodes := make([]*model.StorageNode, 0, len(vnodes))
+	seenNodes := make(map[string]bool)
+	for _, vnode := range vnodes {
+		if seenNodes[vnode.NodeID] {
+			continue
+		}
+		seenNodes[vnode.NodeID] = true
+
+		// Fetch node details from metadata store (simplified - should cache this)
+		storageNodes, err := s.metadataStore.ListStorageNodes(ctx)
+		if err != nil {
+			continue
+		}
+		for _, node := range storageNodes {
+			if node.NodeID == vnode.NodeID && node.Status == "active" {
+				nodes = append(nodes, node)
+				break
+			}
 		}
 	}
 
@@ -123,7 +137,8 @@ func (s *RoutingService) updateHashRing(ctx context.Context) error {
 	// Clear and rebuild hash ring
 	s.hashRing.Clear()
 	for _, node := range activeNodes {
-		s.hashRing.AddNode(node)
+		// AddNode expects (nodeID string, virtualNodeCount int)
+		s.hashRing.AddNode(node.NodeID, node.VirtualNodes)
 	}
 
 	s.logger.Info("Hash ring updated",
@@ -138,7 +153,7 @@ func (s *RoutingService) AddNode(ctx context.Context, node *model.StorageNode) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.hashRing.AddNode(node)
+	s.hashRing.AddNode(node.NodeID, node.VirtualNodes)
 
 	s.logger.Info("Added node to hash ring",
 		zap.String("node_id", node.NodeID),
@@ -166,7 +181,7 @@ func (s *RoutingService) GetNodeCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.hashRing.GetNodeCount()
+	return s.hashRing.NodeCount()
 }
 
 // Stop stops the routing service

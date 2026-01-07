@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pairdb-storage-node
+  namespace: pairdb
+  labels:
+    app: pairdb-storage-node
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: grpc
+  - port: 9091
+    targetPort: 9091
+    protocol: TCP
+    name: metrics
+  selector:
+    app: pairdb-storage-node
+

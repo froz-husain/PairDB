@@ -49,7 +49,7 @@ func main() {
 		zap.Int("port", cfg.Server.Port))
 
 	// Initialize metrics
-	metricsCollector := metrics.NewMetrics()
+	_ = metrics.NewMetrics()
 	logger.Info("Metrics initialized")
 
 	// Initialize metadata store (PostgreSQL)

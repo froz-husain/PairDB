@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pairdb-storage-node-config
+  namespace: pairdb
+  labels:
+    app: pairdb-storage-node
+    component: storage
+data:
+  config.yaml: |
+    server:
+      grpc_port: 8080
+      metrics_port: 9091
+
+    storage:
+      data_dir: /data
+
+    commitlog:
+      segment_size: 16777216  # 16MB (reduced for local)
+      sync_interval: 100
+      retention_hours: 24
+
+    memtable:
+      max_size: 16777216  # 16MB (reduced for local)
+      flush_threshold: 10485760  # 10MB
+      num_memtables: 1
+
+    sstable:
+      l0_trigger: 2
+      max_file_size: 16777216  # 16MB
+      bloom_fpr: 0.01
+      cache_size: 33554432  # 32MB
+
+    cache:
+      max_size: 67108864  # 64MB (reduced for local)
+      eviction_alg: lru
+      ttl: 3600
+
+    compaction:
+      l0_size: 67108864  # 64MB
+      l1_size: 134217728  # 128MB
+      l2_size: 268435456  # 256MB
+      workers: 2
+      throttle: 10
+      level_multiplier: 2
+
+    gossip:
+      bind_port: 7946
+      advertise_port: 7946
+
+    logging:
+      level: info
+      format: json
+

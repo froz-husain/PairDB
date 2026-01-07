@@ -25,11 +25,11 @@ import (
 
 // TestHandlers wraps handlers for integration testing with mock gRPC client.
 type TestHandlers struct {
-	mockClient     *mocks.MockCoordinatorServiceClient
-	handlers       *TestableHandlers
-	router         *mux.Router
-	logger         *zap.Logger
-	errorHandler   *apierrors.Handler
+	mockClient   *mocks.MockCoordinatorServiceClient
+	handlers     *TestableHandlers
+	router       *mux.Router
+	logger       *zap.Logger
+	errorHandler *apierrors.Handler
 }
 
 // TestableHandlers is a handler wrapper for testing.
@@ -57,10 +57,10 @@ func NewTestHandlers() *TestHandlers {
 	}
 
 	router := mux.NewRouter()
-	
+
 	// Setup routes
 	router.Use(middleware.RequestID)
-	
+
 	v1 := router.PathPrefix("/v1").Subrouter()
 	v1.HandleFunc("/key-value", handlers.WriteKeyValue).Methods(http.MethodPost)
 	v1.HandleFunc("/key-value", handlers.ReadKeyValue).Methods(http.MethodGet)
@@ -359,7 +359,7 @@ func TestIntegration_WriteKeyValue(t *testing.T) {
 		th.router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var resp converter.WriteKeyValueHTTPResponse
 		err := json.Unmarshal(w.Body.Bytes(), &resp)
 		require.NoError(t, err)
@@ -398,7 +398,7 @@ func TestIntegration_ReadKeyValue(t *testing.T) {
 		th.router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var resp converter.ReadKeyValueHTTPResponse
 		err := json.Unmarshal(w.Body.Bytes(), &resp)
 		require.NoError(t, err)
@@ -443,7 +443,7 @@ func TestIntegration_CreateTenant(t *testing.T) {
 		th.router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusCreated, w.Code)
-		
+
 		var resp converter.CreateTenantHTTPResponse
 		err := json.Unmarshal(w.Body.Bytes(), &resp)
 		require.NoError(t, err)
@@ -497,7 +497,7 @@ func TestIntegration_ListStorageNodes(t *testing.T) {
 		th.router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var resp converter.ListStorageNodesHTTPResponse
 		err := json.Unmarshal(w.Body.Bytes(), &resp)
 		require.NoError(t, err)
@@ -508,4 +508,3 @@ func TestIntegration_ListStorageNodes(t *testing.T) {
 // Ignore unused variable warning for config
 var _ = config.Config{}
 var _ = handler.Handlers{}
-

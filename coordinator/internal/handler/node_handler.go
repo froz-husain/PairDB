@@ -158,9 +158,9 @@ func (h *NodeHandler) GetMigrationStatus(
 	resp := &pb.GetMigrationStatusResponse{
 		Success:     true,
 		MigrationId: migration.MigrationID,
-		Type:        migration.Type,
+		Type:        string(migration.Type),
 		NodeId:      migration.NodeID,
-		Status:      migration.Status,
+		Status:      string(migration.Status),
 		StartedAt:   migration.StartedAt.Unix(),
 	}
 
@@ -188,7 +188,7 @@ func (h *NodeHandler) ListStorageNodes(
 			NodeId:       node.NodeID,
 			Host:         node.Host,
 			Port:         int32(node.Port),
-			Status:       node.Status,
+			Status:       string(node.Status),
 			VirtualNodes: int32(node.VirtualNodes),
 		}
 	}

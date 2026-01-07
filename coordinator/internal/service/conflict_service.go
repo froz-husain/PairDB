@@ -84,20 +84,20 @@ func (s *ConflictService) DetectConflicts(responses []*client.StorageResponse) (
 		comparison := s.vcService.Compare(resp.VectorClock, latest.VectorClock)
 
 		switch comparison {
-		case model.VectorClockAfter:
+		case model.After:
 			// resp is after latest, update latest
 			latest = resp
-		case model.VectorClockBefore:
+		case model.Before:
 			// resp is before latest, keep latest
 			continue
-		case model.VectorClockConcurrent:
+		case model.Concurrent:
 			// Concurrent writes - conflict detected
 			hasConflict = true
 			// Use timestamp as tiebreaker
 			if resp.Timestamp > latest.Timestamp {
 				latest = resp
 			}
-		case model.VectorClockEqual:
+		case model.Identical:
 			// Same version, no conflict
 			continue
 		}

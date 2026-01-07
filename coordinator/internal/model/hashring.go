@@ -22,13 +22,10 @@ type StorageNode struct {
 type NodeStatus string
 
 const (
-	// NodeStatusActive indicates node is active and accepting requests
-	NodeStatusActive NodeStatus = "active"
-	// NodeStatusDraining indicates node is being drained (migration in progress)
+	NodeStatusActive   NodeStatus = "active"
 	NodeStatusDraining NodeStatus = "draining"
-	// NodeStatusInactive indicates node is inactive
 	NodeStatusInactive NodeStatus = "inactive"
-}
+)
 
 // VirtualNode represents a virtual node in the hash ring
 type VirtualNode struct {
