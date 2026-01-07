@@ -1,0 +1,64 @@
+# Storage Node Configuration
+
+server:
+  node_id: "storage-node-1"
+  host: "0.0.0.0"
+  port: 50052
+  max_connections: 1000
+  read_timeout: 10s
+  write_timeout: 10s
+  shutdown_timeout: 30s
+
+storage:
+  data_dir: "/var/lib/pairdb"
+  commit_log_dir: "/var/lib/pairdb/commitlog"
+  sstable_dir: "/var/lib/pairdb/sstables"
+  max_disk_usage: 0.9
+
+commit_log:
+  segment_size: 1073741824  # 1GB
+  max_age: 168h             # 7 days
+  sync_writes: true
+  buffer_size: 65536
+
+mem_table:
+  max_size: 67108864        # 64MB
+  flush_threshold: 60000000 # 60MB
+  num_mem_tables: 2
+
+sstable:
+  l0_size: 67108864         # 64MB
+  l1_size: 134217728        # 128MB
+  l2_size: 268435456        # 256MB
+  level_multiplier: 2
+  bloom_filter_fp: 0.01     # 1% false positive
+  block_size: 4096
+  index_interval: 100
+
+cache:
+  max_size: 1073741824      # 1GB
+  frequency_weight: 0.5
+  recency_weight: 0.5
+  adaptive_window: 5m
+
+compaction:
+  l0_trigger: 4
+  workers: 2
+  throttle: 50              # 50 MB/s
+
+gossip:
+  enabled: false
+  bind_port: 7946
+  seed_nodes: []
+  gossip_interval: 5s
+  probe_timeout: 500ms
+  probe_interval: 1s
+
+metrics:
+  enabled: true
+  port: 9091
+  path: "/metrics"
+
+logging:
+  level: "info"
+  format: "json"

@@ -1,0 +1,33 @@
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+  shutdown_timeout: 30s
+
+coordinator:
+  endpoints:
+    - localhost:50051
+  timeout: 30s
+  max_retries: 3
+  retry_backoff: 100ms
+  keepalive_time: 30s
+  keepalive_timeout: 10s
+  max_receive_message_size: 16777216  # 16MB
+  max_send_message_size: 16777216     # 16MB
+
+rate_limiter:
+  enabled: true
+  requests_per_second: 1000
+  burst_size: 100
+
+metrics:
+  enabled: true
+  port: 9090
+  path: /metrics
+
+logging:
+  level: info
+  format: json
+  output: stdout
+

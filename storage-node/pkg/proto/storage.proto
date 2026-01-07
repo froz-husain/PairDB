@@ -1,0 +1,169 @@
+syntax = "proto3";
+
+package storage;
+
+option go_package = "github.com/devrev/pairdb/storage-node/pkg/proto;proto";
+
+// StorageNodeService defines the storage node gRPC API
+service StorageNodeService {
+  // Core Operations
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Repair(RepairRequest) returns (RepairResponse);
+
+  // Migration Operations
+  rpc ReplicateData(ReplicateRequest) returns (ReplicateResponse);
+  rpc StreamKeys(StreamKeysRequest) returns (stream KeyValueEntry);
+  rpc GetKeyRange(KeyRangeRequest) returns (KeyRangeResponse);
+  rpc DrainNode(DrainRequest) returns (DrainResponse);
+
+  // Health Check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthResponse);
+}
+
+// VectorClockEntry represents a single entry in the vector clock
+message VectorClockEntry {
+  string coordinator_node_id = 1;
+  int64 logical_timestamp = 2;
+}
+
+// VectorClock tracks causality across coordinators
+message VectorClock {
+  repeated VectorClockEntry entries = 1;
+}
+
+// KeyValueEntry represents a complete key-value pair with metadata
+message KeyValueEntry {
+  string tenant_id = 1;
+  string key = 2;
+  bytes value = 3;
+  VectorClock vector_clock = 4;
+  int64 timestamp = 5;
+}
+
+// WriteRequest is sent by coordinators to write data
+message WriteRequest {
+  string tenant_id = 1;
+  string key = 2;
+  bytes value = 3;
+  VectorClock vector_clock = 4;
+  string idempotency_key = 5;  // Optional, for logging
+}
+
+// WriteResponse confirms successful write
+message WriteResponse {
+  bool success = 1;
+  VectorClock updated_vector_clock = 2;
+  string error_message = 3;
+  ErrorCode error_code = 4;
+}
+
+// ReadRequest is sent by coordinators to read data
+message ReadRequest {
+  string tenant_id = 1;
+  string key = 2;
+}
+
+// ReadResponse returns the value and metadata
+message ReadResponse {
+  bool success = 1;
+  bytes value = 2;
+  VectorClock vector_clock = 3;
+  string error_message = 4;
+  ErrorCode error_code = 5;
+}
+
+// RepairRequest is sent during read repair
+message RepairRequest {
+  string tenant_id = 1;
+  string key = 2;
+  bytes value = 3;
+  VectorClock vector_clock = 4;
+}
+
+// RepairResponse confirms repair operation
+message RepairResponse {
+  bool success = 1;
+  string error_message = 2;
+  ErrorCode error_code = 3;
+}
+
+// ReplicateRequest initiates data replication
+message ReplicateRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  repeated string keys = 4;
+  string target_node_id = 5;
+  bool include_vector_clock = 6;
+}
+
+// ReplicateResponse confirms replication
+message ReplicateResponse {
+  bool success = 1;
+  int64 keys_replicated = 2;
+  string error_message = 3;
+  ErrorCode error_code = 4;
+}
+
+// StreamKeysRequest initiates key streaming
+message StreamKeysRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  int32 batch_size = 4;
+}
+
+// KeyRangeRequest gets list of keys in range
+message KeyRangeRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  int32 max_keys = 4;
+}
+
+// KeyRangeResponse returns list of keys
+message KeyRangeResponse {
+  repeated string keys = 1;
+  bool has_more = 2;
+  string next_key = 3;
+}
+
+// DrainRequest prepares node for removal
+message DrainRequest {
+  bool graceful = 1;
+  int32 timeout_seconds = 2;
+}
+
+// DrainResponse confirms drain status
+message DrainResponse {
+  bool success = 1;
+  string status = 2;
+  string error_message = 3;
+  ErrorCode error_code = 4;
+}
+
+// HealthCheckRequest checks node health
+message HealthCheckRequest {
+  // Empty
+}
+
+// HealthResponse returns health status
+message HealthResponse {
+  bool healthy = 1;
+  string status = 2;
+  map<string, string> metrics = 3;
+}
+
+// ErrorCode defines possible error conditions
+enum ErrorCode {
+  UNKNOWN = 0;
+  INVALID_REQUEST = 1;
+  TENANT_NOT_FOUND = 2;
+  KEY_NOT_FOUND = 3;
+  INTERNAL_ERROR = 4;
+  DISK_FULL = 5;
+  MEMORY_PRESSURE = 6;
+  NODE_DRAINING = 7;
+  CORRUPTED_DATA = 8;
+}

@@ -24,7 +24,25 @@ Complete API specifications including:
 - Consistency levels
 - Examples
 
-### 4. [Coordinator Design](coordinator/design.md)
+### 4. [API Gateway Design](api-gateway/design.md)
+High-level design for the API Gateway service:
+- Requirements
+- Service architecture
+- REST API endpoints
+- HTTP to gRPC conversion
+- Load balancing
+- Error handling
+- Deployment considerations
+
+### 5. [API Gateway Low-Level Design](api-gateway/low-level-design.md)
+Very high-level low-level design for API Gateway implementation:
+- Package structure
+- Core components
+- Request flow implementation
+- Error handling
+- Testing strategy
+
+### 6. [Coordinator Design](coordinator/design.md)
 High-level design for the Coordinator service:
 - Requirements
 - Service architecture
@@ -34,7 +52,7 @@ High-level design for the Coordinator service:
 - Performance optimizations
 - Deployment considerations
 
-### 5. [Storage Node Design](storage-node/design.md)
+### 7. [Storage Node Design](storage-node/design.md)
 High-level design for the Storage Node service:
 - Requirements
 - Service architecture
@@ -65,9 +83,9 @@ For low-level design, the following topics will be covered:
 
 ## Key Technologies
 
-- **API Gateway**: HTTP/REST (Kong, Envoy, or custom)
-- **Coordinator**: HTTP/gRPC microservice (Go/Java/Python)
-- **Storage Node**: Custom storage engine (Go/C++/Rust)
+- **API Gateway**: HTTP custom
+- **Coordinator**: gRPC microservice (Go)
+- **Storage Node**: Custom storage engine (Go)
 - **Metadata Store**: PostgreSQL (primary) + Redis (cache)
 - **Idempotency Store**: Redis (distributed cache with TTL)
 

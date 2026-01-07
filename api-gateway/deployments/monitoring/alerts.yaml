@@ -1,0 +1,113 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: api-gateway-alerts
+  namespace: pairdb
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: pairdb
+spec:
+  groups:
+    - name: api-gateway.rules
+      rules:
+        # High error rate
+        - alert: APIGatewayHighErrorRate
+          expr: |
+            sum(rate(api_gateway_http_requests_total{status=~"5.."}[5m])) 
+            / sum(rate(api_gateway_http_requests_total[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: High error rate on API Gateway
+            description: API Gateway has error rate above 5% for more than 5 minutes.
+
+        # High latency
+        - alert: APIGatewayHighLatency
+          expr: |
+            histogram_quantile(0.95, sum(rate(api_gateway_http_request_duration_seconds_bucket[5m])) by (le)) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High latency on API Gateway
+            description: API Gateway P95 latency is above 1 second for more than 5 minutes.
+
+        # Too many in-flight requests
+        - alert: APIGatewayHighInFlightRequests
+          expr: api_gateway_http_requests_in_flight > 1000
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: High number of in-flight requests
+            description: API Gateway has more than 1000 requests in flight.
+
+        # Pod not ready
+        - alert: APIGatewayPodNotReady
+          expr: |
+            kube_pod_status_ready{namespace="pairdb", pod=~"api-gateway-.*"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: API Gateway pod not ready
+            description: API Gateway pod {{ $labels.pod }} has been not ready for more than 5 minutes.
+
+        # gRPC connection errors
+        - alert: APIGatewayGRPCErrors
+          expr: |
+            sum(rate(api_gateway_grpc_errors_total[5m])) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High gRPC error rate
+            description: API Gateway is experiencing high gRPC error rate.
+
+        # Health status down
+        - alert: APIGatewayUnhealthy
+          expr: api_gateway_health_status == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: API Gateway unhealthy
+            description: API Gateway health status is unhealthy.
+
+        # Insufficient replicas
+        - alert: APIGatewayInsufficientReplicas
+          expr: |
+            kube_deployment_status_replicas_available{namespace="pairdb", deployment="api-gateway"} < 2
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Insufficient API Gateway replicas
+            description: API Gateway has fewer than 2 available replicas.
+
+        # High memory usage
+        - alert: APIGatewayHighMemoryUsage
+          expr: |
+            container_memory_usage_bytes{namespace="pairdb", container="api-gateway"} 
+            / container_spec_memory_limit_bytes{namespace="pairdb", container="api-gateway"} > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High memory usage on API Gateway
+            description: API Gateway memory usage is above 85% of limit.
+
+        # High CPU usage
+        - alert: APIGatewayHighCPUUsage
+          expr: |
+            rate(container_cpu_usage_seconds_total{namespace="pairdb", container="api-gateway"}[5m]) 
+            / container_spec_cpu_quota{namespace="pairdb", container="api-gateway"} * 100000 > 0.85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: High CPU usage on API Gateway
+            description: API Gateway CPU usage is above 85% of limit.
+

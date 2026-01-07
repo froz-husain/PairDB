@@ -1,0 +1,167 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pairdb-alerts
+  namespace: pairdb
+data:
+  alerts.yml: |
+    groups:
+    - name: pairdb-storage-node
+      interval: 30s
+      rules:
+
+      # High Error Rate
+      - alert: PairDBHighErrorRate
+        expr: |
+          rate(pairdb_storage_write_requests_total{job="pairdb-storage-node"}[5m]) > 0 and
+          rate(pairdb_storage_write_requests_total{error="true"}[5m]) /
+          rate(pairdb_storage_write_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "High error rate on {{ $labels.pod }}"
+          description: "Error rate is {{ $value | humanizePercentage }} on pod {{ $labels.pod }}"
+
+      # High Disk Usage
+      - alert: PairDBHighDiskUsage
+        expr: pairdb_system_disk_usage_percent{job="pairdb-storage-node"} > 85
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "High disk usage on {{ $labels.pod }}"
+          description: "Disk usage is {{ $value }}% on pod {{ $labels.pod }}"
+
+      # Critical Disk Usage
+      - alert: PairDBCriticalDiskUsage
+        expr: pairdb_system_disk_usage_percent{job="pairdb-storage-node"} > 95
+        for: 2m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "Critical disk usage on {{ $labels.pod }}"
+          description: "Disk usage is {{ $value }}% on pod {{ $labels.pod }}. Immediate action required!"
+
+      # High Memory Usage
+      - alert: PairDBHighMemoryUsage
+        expr: pairdb_system_memory_usage_bytes{job="pairdb-storage-node"} > 3.5e9
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "High memory usage on {{ $labels.pod }}"
+          description: "Memory usage is {{ $value | humanize }}B on pod {{ $labels.pod }}"
+
+      # Slow Write Latency
+      - alert: PairDBSlowWriteLatency
+        expr: |
+          histogram_quantile(0.99,
+            rate(pairdb_storage_write_requests_duration_seconds_bucket[5m])
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Slow write latency on {{ $labels.pod }}"
+          description: "P99 write latency is {{ $value }}s on pod {{ $labels.pod }}"
+
+      # Slow Read Latency
+      - alert: PairDBSlowReadLatency
+        expr: |
+          histogram_quantile(0.99,
+            rate(pairdb_storage_read_requests_duration_seconds_bucket[5m])
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Slow read latency on {{ $labels.pod }}"
+          description: "P99 read latency is {{ $value }}s on pod {{ $labels.pod }}"
+
+      # Low Cache Hit Rate
+      - alert: PairDBLowCacheHitRate
+        expr: |
+          rate(pairdb_cache_hits_total[5m]) /
+          (rate(pairdb_cache_hits_total[5m]) + rate(pairdb_cache_misses_total[5m])) < 0.5
+        for: 10m
+        labels:
+          severity: info
+          component: storage
+        annotations:
+          summary: "Low cache hit rate on {{ $labels.pod }}"
+          description: "Cache hit rate is {{ $value | humanizePercentage }} on pod {{ $labels.pod }}"
+
+      # Large MemTable Size
+      - alert: PairDBLargeMemTable
+        expr: pairdb_memtable_size_bytes{job="pairdb-storage-node"} > 60e6
+        for: 15m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Large memtable on {{ $labels.pod }}"
+          description: "MemTable size is {{ $value | humanize }}B on pod {{ $labels.pod }}"
+
+      # Too Many L0 SSTables
+      - alert: PairDBTooManyL0SSTables
+        expr: pairdb_sstable_count_by_level{level="0"} > 8
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Too many L0 SSTables on {{ $labels.pod }}"
+          description: "{{ $value }} L0 SSTables on pod {{ $labels.pod }}. Compaction may be falling behind."
+
+      # Compaction Failures
+      - alert: PairDBCompactionFailures
+        expr: rate(pairdb_compaction_jobs_total{status="failed"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Compaction failures on {{ $labels.pod }}"
+          description: "Compaction is failing on pod {{ $labels.pod }}"
+
+      # Pod Down
+      - alert: PairDBPodDown
+        expr: up{job="pairdb-storage-node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: storage
+        annotations:
+          summary: "PairDB pod down"
+          description: "Pod {{ $labels.pod }} has been down for more than 2 minutes"
+
+      # Gossip Member Lost
+      - alert: PairDBGossipMemberLost
+        expr: |
+          pairdb_gossip_members_total{job="pairdb-storage-node"} <
+          pairdb_gossip_members_total{job="pairdb-storage-node"} offset 5m
+        for: 5m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "Gossip member lost on {{ $labels.pod }}"
+          description: "Cluster membership has decreased on pod {{ $labels.pod }}"
+
+      # High Goroutine Count
+      - alert: PairDBHighGoroutineCount
+        expr: pairdb_system_goroutines_total{job="pairdb-storage-node"} > 10000
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+        annotations:
+          summary: "High goroutine count on {{ $labels.pod }}"
+          description: "{{ $value }} goroutines running on pod {{ $labels.pod }}. Possible goroutine leak."
