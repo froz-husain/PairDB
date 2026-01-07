@@ -190,22 +190,29 @@ make build
 - **[High-Level Design](docs/high-level-design.md)**: System architecture, component overview, and key design decisions
 - **[Requirements](docs/requirements.md)**: Functional and non-functional requirements
 - **[API Contracts](docs/api-contracts.md)**: Complete API specifications
+- **[Use Case Diagram](docs/use-case-diagram.md)**: Global use case diagram showing all actors and use cases
 
 ### Component-Specific Documentation
 
 #### API Gateway
 - **[Design Document](docs/api-gateway/design.md)**: High-level design for API Gateway
 - **[Low-Level Design](docs/api-gateway/low-level-design.md)**: Detailed implementation specifications
+- **[Class Diagram](docs/api-gateway/class-diagram.md)**: Core entities and their relationships
+- **[Sequence Diagrams](docs/api-gateway/sequence-diagrams.md)**: All flow diagrams (write, read, tenant management, etc.)
 - **[API Contracts](docs/api-gateway/design.md#api-endpoints)**: REST API endpoints
 
 #### Coordinator
 - **[Design Document](docs/coordinator/design.md)**: High-level design for Coordinator service
 - **[Low-Level Design](docs/coordinator/low-level-design.md)**: Detailed implementation specifications
+- **[Class Diagram](docs/coordinator/class-diagram.md)**: Core entities and their relationships
+- **[Sequence Diagrams](docs/coordinator/sequence-diagrams.md)**: All flow diagrams (write, read, conflict resolution, etc.)
 - **[API Contracts](docs/coordinator/api-contracts.md)**: gRPC API specifications
 
 #### Storage Node
 - **[Design Document](docs/storage-node/design.md)**: High-level design for Storage Node
 - **[Low-Level Design](docs/storage-node/low-level-design.md)**: Detailed implementation specifications
+- **[Class Diagram](docs/storage-node/class-diagram.md)**: Core entities and their relationships
+- **[Sequence Diagrams](docs/storage-node/sequence-diagrams.md)**: All flow diagrams (write, read, compaction, repair, etc.)
 - **[API Contracts](docs/storage-node/api-contracts.md)**: gRPC API specifications
 
 ### Component READMEs

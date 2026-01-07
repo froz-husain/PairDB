@@ -15,7 +15,14 @@ Complete functional and non-functional requirements for the system.
 - Key design decisions
 - Simplified scalability considerations and edge case solutions
 
-### 3. [API Contracts](api-contracts.md)
+### 3. [Use Case Diagram](use-case-diagram.md)
+Global use case diagram for pairDB showing:
+- All actors (Client, Administrator)
+- Use cases for each service layer
+- Relationships between use cases
+- System boundaries
+
+### 4. [API Contracts](api-contracts.md)
 Complete API specifications including:
 - Tenant Management APIs
 - Key-Value APIs
@@ -24,7 +31,7 @@ Complete API specifications including:
 - Consistency levels
 - Examples
 
-### 4. [API Gateway Design](api-gateway/design.md)
+### 5. [API Gateway Design](api-gateway/design.md)
 High-level design for the API Gateway service:
 - Requirements
 - Service architecture
@@ -42,6 +49,23 @@ Very high-level low-level design for API Gateway implementation:
 - Error handling
 - Testing strategy
 
+### 5.1. [API Gateway Class Diagram](api-gateway/class-diagram.md)
+Class diagram showing:
+- Core entities and their relationships
+- Component interactions
+- Data structures
+
+### 5.2. [API Gateway Sequence Diagrams](api-gateway/sequence-diagrams.md)
+Sequence diagrams for all flows:
+- Write Key-Value flow
+- Read Key-Value flow
+- Create Tenant flow
+- Update Replication Factor flow
+- Add Storage Node flow
+- Error handling flow
+- Health check flow
+- Idempotency key handling flow
+
 ### 6. [Coordinator Design](coordinator/design.md)
 High-level design for the Coordinator service:
 - Requirements
@@ -51,6 +75,26 @@ High-level design for the Coordinator service:
 - Key algorithms
 - Performance optimizations
 - Deployment considerations
+
+### 6.1. [Coordinator Low-Level Design](coordinator/low-level-design.md)
+Detailed implementation specifications for Coordinator service.
+
+### 6.2. [Coordinator Class Diagram](coordinator/class-diagram.md)
+Class diagram showing:
+- Core entities and their relationships
+- Service layer components
+- Data models and algorithms
+
+### 6.3. [Coordinator Sequence Diagrams](coordinator/sequence-diagrams.md)
+Sequence diagrams for all flows:
+- Write Key-Value flow (Quorum Consistency)
+- Read Key-Value flow (Quorum Consistency)
+- Conflict Resolution flow
+- Create Tenant flow
+- Update Replication Factor flow
+- Add Storage Node flow
+- Hash Ring Update flow
+- Idempotency Check flow
 
 ### 7. [Storage Node Design](storage-node/design.md)
 High-level design for the Storage Node service:
@@ -62,6 +106,26 @@ High-level design for the Storage Node service:
 - Performance optimizations
 - Deployment considerations
 
+### 7.1. [Storage Node Low-Level Design](storage-node/low-level-design.md)
+Detailed implementation specifications for Storage Node service.
+
+### 7.2. [Storage Node Class Diagram](storage-node/class-diagram.md)
+Class diagram showing:
+- Core entities and their relationships
+- Storage layer components
+- Data structures (MemTable, SSTable, Cache, etc.)
+
+### 7.3. [Storage Node Sequence Diagrams](storage-node/sequence-diagrams.md)
+Sequence diagrams for all flows:
+- Write Operation flow
+- Read Operation flow
+- MemTable Flush flow
+- Compaction flow
+- Repair Operation flow
+- Commit Log Recovery flow
+- Cache Eviction flow
+- Gossip Health Monitoring flow
+
 ## Design Philosophy
 
 This design is optimized for **decent scale** applications:
@@ -70,16 +134,15 @@ This design is optimized for **decent scale** applications:
 - Simplified solutions for edge cases (practical over perfect)
 - Focus on operational simplicity
 
-## Next Steps
+## Design Diagrams
 
-For low-level design, the following topics will be covered:
-- Detailed sequence diagrams for all flows
-- Implementation details for each component
-- Database schema designs
-- Protocol buffer definitions
-- Error handling strategies
-- Testing strategies
-- Deployment configurations
+The documentation includes comprehensive diagrams:
+
+- **Use Case Diagram**: Global view of all system use cases
+- **Class Diagrams**: Entity relationships for each service
+- **Sequence Diagrams**: Detailed flow diagrams for all operations
+
+These diagrams provide visual representation of the system architecture and help understand the interactions between components.
 
 ## Key Technologies
 
