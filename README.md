@@ -1,4 +1,4 @@
-# pairDB - Distributed Key-Value Store
+# PairDB - Distributed Key-Value Store
 
 pairDB is a distributed, horizontally scalable key-value store designed for high availability and low latency at decent scale. It supports tunable consistency levels, multi-tenancy with per-tenant replication factors, and idempotency for write operations.
 
