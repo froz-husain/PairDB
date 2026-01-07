@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-echo -e "${GREEN}=== Building Docker Images for PearDB ===${NC}"
+echo -e "${GREEN}=== Building Docker Images for pairDB ===${NC}"
 
 # Check if minikube is running
 if ! minikube status &> /dev/null; then

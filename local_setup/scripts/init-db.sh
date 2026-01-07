@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-echo -e "${GREEN}=== Initializing PearDB Database ===${NC}"
+echo -e "${GREEN}=== Initializing pairDB Database ===${NC}"
 
 # Get PostgreSQL pod
 PG_POD=$(kubectl get pod -l app=postgres -n pairdb -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")

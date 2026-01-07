@@ -8,10 +8,10 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${YELLOW}=== Cleaning up PearDB Local Setup ===${NC}"
+echo -e "${YELLOW}=== Cleaning up pairDB Local Setup ===${NC}"
 
 # Confirm deletion
-read -p "This will delete all PearDB resources in the 'pairdb' namespace. Continue? (y/n) " -n 1 -r
+read -p "This will delete all pairDB resources in the 'pairdb' namespace. Continue? (y/n) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Cancelled."

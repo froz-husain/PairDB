@@ -1,6 +1,6 @@
-# Local Development Setup for PearDB
+# Local Development Setup for pairDB
 
-This directory contains scripts and configurations to deploy PearDB on a local Kubernetes cluster (Minikube) with minimal resource requirements suitable for development and testing.
+This directory contains scripts and configurations to deploy pairDB on a local Kubernetes cluster (Minikube) with minimal resource requirements suitable for development and testing.
 
 ## Prerequisites
 

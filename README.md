@@ -1,10 +1,10 @@
-# PearDB - Distributed Key-Value Store
+# pairDB - Distributed Key-Value Store
 
-PearDB is a distributed, horizontally scalable key-value store designed for high availability and low latency at decent scale. It supports tunable consistency levels, multi-tenancy with per-tenant replication factors, and idempotency for write operations.
+pairDB is a distributed, horizontally scalable key-value store designed for high availability and low latency at decent scale. It supports tunable consistency levels, multi-tenancy with per-tenant replication factors, and idempotency for write operations.
 
 ## Overview
 
-PearDB is a production-ready distributed key-value store that provides:
+pairDB is a production-ready distributed key-value store that provides:
 
 - **Distributed Architecture**: Three-layer architecture with API Gateway, Coordinator, and Storage Nodes
 - **Tunable Consistency**: Support for multiple consistency levels (one, quorum, all) at SDK or per-request level
@@ -17,7 +17,7 @@ PearDB is a production-ready distributed key-value store that provides:
 
 ## Architecture
 
-PearDB consists of three main layers:
+pairDB consists of three main layers:
 
 1. **API Gateway Layer**: Entry point for all client requests, handles authentication, rate limiting, and load balancing
 2. **Coordinator Layer**: Stateless servers that handle request routing, consistency coordination, and conflict resolution

@@ -12,7 +12,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 K8S_DIR="${SCRIPT_DIR}/k8s"
 
-echo -e "${GREEN}=== PearDB Local Setup Deployment ===${NC}"
+echo -e "${GREEN}=== pairDB Local Setup Deployment ===${NC}"
 
 # Check if kubectl is available
 if ! command -v kubectl &> /dev/null; then
