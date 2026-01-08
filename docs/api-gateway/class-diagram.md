@@ -7,19 +7,19 @@ This document provides a class diagram showing the core entities and their relat
 ```mermaid
 classDiagram
     class Server {
-        -router: *mux.Router
-        -grpcClient: *CoordinatorClient
-        -httpServer: *http.Server
-        +NewServer(cfg, client) *Server
+        -router Router
+        -grpcClient CoordinatorClient
+        -httpServer HttpServer
+        +NewServer(cfg, client) Server
         +SetupRoutes()
         +Start() error
         +Shutdown(ctx) error
     }
     
     class Handlers {
-        -grpcClient: *CoordinatorClient
-        -converter: *Converter
-        -errorHandler: *ErrorHandler
+        -grpcClient CoordinatorClient
+        -converter Converter
+        -errorHandler ErrorHandler
         +WriteKeyValue(w, r)
         +ReadKeyValue(w, r)
         +CreateTenant(w, r)
@@ -32,105 +32,105 @@ classDiagram
     }
     
     class CoordinatorClient {
-        -client: CoordinatorServiceClient
-        -endpoints: []string
-        -conn: *grpc.ClientConn
-        +WriteKeyValue(ctx, req) *WriteKeyValueResponse
-        +ReadKeyValue(ctx, req) *ReadKeyValueResponse
-        +CreateTenant(ctx, req) *CreateTenantResponse
-        +UpdateReplicationFactor(ctx, req) *UpdateReplicationFactorResponse
-        +GetTenant(ctx, req) *GetTenantResponse
-        +AddStorageNode(ctx, req) *AddStorageNodeResponse
-        +RemoveStorageNode(ctx, req) *RemoveStorageNodeResponse
-        +GetMigrationStatus(ctx, req) *GetMigrationStatusResponse
-        +ListStorageNodes(ctx, req) *ListStorageNodesResponse
+        -client CoordinatorServiceClient
+        -endpoints string[]
+        -conn ClientConn
+        +WriteKeyValue(ctx, req) WriteKeyValueResponse
+        +ReadKeyValue(ctx, req) ReadKeyValueResponse
+        +CreateTenant(ctx, req) CreateTenantResponse
+        +UpdateReplicationFactor(ctx, req) UpdateReplicationFactorResponse
+        +GetTenant(ctx, req) GetTenantResponse
+        +AddStorageNode(ctx, req) AddStorageNodeResponse
+        +RemoveStorageNode(ctx, req) RemoveStorageNodeResponse
+        +GetMigrationStatus(ctx, req) GetMigrationStatusResponse
+        +ListStorageNodes(ctx, req) ListStorageNodesResponse
         +HealthCheck() error
         +Close() error
     }
     
     class Converter {
-        +WriteKeyValueRequest(r) *WriteKeyValueRequest
-        +ReadKeyValueRequest(r) *ReadKeyValueRequest
-        +CreateTenantRequest(r) *CreateTenantRequest
-        +UpdateReplicationFactorRequest(r) *UpdateReplicationFactorRequest
-        +GetTenantRequest(r) *GetTenantRequest
-        +AddStorageNodeRequest(r) *AddStorageNodeRequest
-        +RemoveStorageNodeRequest(r) *RemoveStorageNodeRequest
-        +GetMigrationStatusRequest(r) *GetMigrationStatusRequest
-        +ListStorageNodesRequest(r) *ListStorageNodesRequest
-        +WriteKeyValueResponse(resp) interface{}
-        +ReadKeyValueResponse(resp) interface{}
-        +CreateTenantResponse(resp) interface{}
-        +UpdateReplicationFactorResponse(resp) interface{}
-        +GetTenantResponse(resp) interface{}
-        +AddStorageNodeResponse(resp) interface{}
-        +RemoveStorageNodeResponse(resp) interface{}
-        +GetMigrationStatusResponse(resp) interface{}
-        +ListStorageNodesResponse(resp) interface{}
+        +WriteKeyValueRequest(r) WriteKeyValueRequest
+        +ReadKeyValueRequest(r) ReadKeyValueRequest
+        +CreateTenantRequest(r) CreateTenantRequest
+        +UpdateReplicationFactorRequest(r) UpdateReplicationFactorRequest
+        +GetTenantRequest(r) GetTenantRequest
+        +AddStorageNodeRequest(r) AddStorageNodeRequest
+        +RemoveStorageNodeRequest(r) RemoveStorageNodeRequest
+        +GetMigrationStatusRequest(r) GetMigrationStatusRequest
+        +ListStorageNodesRequest(r) ListStorageNodesRequest
+        +WriteKeyValueResponse(resp) interface
+        +ReadKeyValueResponse(resp) interface
+        +CreateTenantResponse(resp) interface
+        +UpdateReplicationFactorResponse(resp) interface
+        +GetTenantResponse(resp) interface
+        +AddStorageNodeResponse(resp) interface
+        +RemoveStorageNodeResponse(resp) interface
+        +GetMigrationStatusResponse(resp) interface
+        +ListStorageNodesResponse(resp) interface
     }
     
     class ErrorHandler {
-        -logger: *log.Logger
+        -logger Logger
         +HandleError(w, err)
         +GrpcToHTTPStatus(err) int
         +WriteErrorResponse(w, statusCode, errorCode, message)
     }
     
     class Config {
-        +Server: ServerConfig
-        +Coordinator: CoordinatorConfig
-        +RateLimiter: RateLimiterConfig
-        +Metrics: MetricsConfig
-        +Logging: LoggingConfig
+        +Server ServerConfig
+        +Coordinator CoordinatorConfig
+        +RateLimiter RateLimiterConfig
+        +Metrics MetricsConfig
+        +Logging LoggingConfig
     }
     
     class ServerConfig {
-        +Port: int
-        +ReadTimeout: time.Duration
-        +WriteTimeout: time.Duration
-        +IdleTimeout: time.Duration
-        +ShutdownTimeout: time.Duration
+        +Port int
+        +ReadTimeout Duration
+        +WriteTimeout Duration
+        +IdleTimeout Duration
+        +ShutdownTimeout Duration
     }
     
     class CoordinatorConfig {
-        +Endpoints: []string
-        +Timeout: time.Duration
-        +MaxRetries: int
-        +RetryBackoff: time.Duration
-        +KeepaliveTime: time.Duration
-        +KeepaliveTimeout: time.Duration
-        +MaxReceiveMessageSize: int
-        +MaxSendMessageSize: int
+        +Endpoints string[]
+        +Timeout Duration
+        +MaxRetries int
+        +RetryBackoff Duration
+        +KeepaliveTime Duration
+        +KeepaliveTimeout Duration
+        +MaxReceiveMessageSize int
+        +MaxSendMessageSize int
     }
     
     class RateLimiterConfig {
-        +Enabled: bool
-        +RequestsPerSecond: int
-        +BurstSize: int
+        +Enabled bool
+        +RequestsPerSecond int
+        +BurstSize int
     }
     
     class MetricsConfig {
-        +Enabled: bool
-        +Port: int
-        +Path: string
+        +Enabled bool
+        +Port int
+        +Path string
     }
     
     class LoggingConfig {
-        +Level: string
-        +Format: string
-        +Output: string
+        +Level string
+        +Format string
+        +Output string
     }
     
     class HealthHandler {
         +HealthHandler(w, r)
-        +ReadinessHandler(client) http.HandlerFunc
+        +ReadinessHandler(client) HandlerFunc
     }
     
     class Middleware {
-        +AuthMiddleware(next) http.HandlerFunc
-        +RateLimitMiddleware(next) http.HandlerFunc
-        +LoggingMiddleware(next) http.HandlerFunc
-        +RequestIDMiddleware(next) http.HandlerFunc
+        +AuthMiddleware(next) HandlerFunc
+        +RateLimitMiddleware(next) HandlerFunc
+        +LoggingMiddleware(next) HandlerFunc
+        +RequestIDMiddleware(next) HandlerFunc
     }
     
     Server --> Handlers : uses

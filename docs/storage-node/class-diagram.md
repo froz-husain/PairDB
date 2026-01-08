@@ -7,15 +7,15 @@ This document provides a class diagram showing the core entities and their relat
 ```mermaid
 classDiagram
     class StorageService {
-        -commitLogService: *CommitLogService
-        -memTableService: *MemTableService
-        -sstableService: *SSTableService
-        -cacheService: *CacheService
-        -vectorClockService: *VectorClockService
-        -logger: *zap.Logger
-        -nodeID: string
-        +Write(ctx, tenantID, key, value, vectorClock) *WriteResponse
-        +Read(ctx, tenantID, key) *ReadResponse
+        -commitLogService CommitLogService
+        -memTableService MemTableService
+        -sstableService SSTableService
+        -cacheService CacheService
+        -vectorClockService VectorClockService
+        -logger Logger
+        -nodeID string
+        +Write(ctx, tenantID, key, value, vectorClock) WriteResponse
+        +Read(ctx, tenantID, key) ReadResponse
         +Repair(ctx, tenantID, key, value, vectorClock) error
         +triggerFlush()
         +validateWrite(tenantID, key, value) error
@@ -23,13 +23,13 @@ classDiagram
     }
     
     class CommitLogService {
-        -config: *CommitLogConfig
-        -currentFile: *os.File
-        -writer: *CommitLogWriter
-        -logger: *zap.Logger
-        -mu: sync.Mutex
-        -dataDir: string
-        -segmentID: int64
+        -config CommitLogConfig
+        -currentFile File
+        -writer CommitLogWriter
+        -logger Logger
+        -mu Mutex
+        -dataDir string
+        -segmentID int64
         +Append(ctx, entry) error
         +Recover(ctx, memTableSvc) error
         +openNewSegment() error
@@ -38,62 +38,62 @@ classDiagram
     }
     
     class MemTableService {
-        -config: *MemTableConfig
-        -memTable: *MemTable
-        -immutableMT: *MemTable
-        -logger: *zap.Logger
-        -mu: sync.RWMutex
-        -flushMu: sync.Mutex
+        -config MemTableConfig
+        -memTable MemTable
+        -immutableMT MemTable
+        -logger Logger
+        -mu RWMutex
+        -flushMu Mutex
         +Put(ctx, entry) error
-        +Get(ctx, key) *MemTableEntry, bool
+        +Get(ctx, key) MemTableEntry
         +ShouldFlush() bool
         +Flush(ctx, sstableSvc) error
     }
     
     class MemTable {
-        -data: *SkipList
-        -maxSize: int64
-        -size: int64
-        -mu: sync.RWMutex
+        -data SkipList
+        -maxSize int64
+        -size int64
+        -mu RWMutex
         +Put(entry) error
-        +Get(key) *MemTableEntry, bool
+        +Get(key) MemTableEntry
         +Size() int64
         +Count() int
-        +Iterator() *MemTableIterator
+        +Iterator() MemTableIterator
     }
     
     class SkipList {
-        -head: *SkipListNode
-        -level: int
-        -size: int
+        -head SkipListNode
+        -level int
+        -size int
         +Insert(key, value)
-        +Search(key) interface{}, bool
+        +Search(key) interface
         +Len() int
         +randomLevel() int
     }
     
     class SSTableService {
-        -config: *SSTableConfig
-        -dataDir: string
-        -logger: *zap.Logger
-        -levels: map[SSTableLevel][]*SSTableMetadata
-        -mu: sync.RWMutex
+        -config SSTableConfig
+        -dataDir string
+        -logger Logger
+        -levels map
+        -mu RWMutex
         +WriteFromMemTable(ctx, memTable) error
-        +Get(ctx, tenantID, key) *KeyValueEntry
-        +GetTablesForLevel(level) []*SSTableMetadata
+        +Get(ctx, tenantID, key) KeyValueEntry
+        +GetTablesForLevel(level) SSTableMetadata[]
         +AddTable(level, table)
         +RemoveTables(level, tableIDs)
         +keyInRange(key, keyRange) bool
     }
     
     class SSTableWriter {
-        -dataFile: *os.File
-        -indexFile: *os.File
-        -bloomFile: *os.File
-        -config: *SSTableConfig
-        -offset: int64
-        -index: []IndexEntry
-        -bloomFilter: *BloomFilter
+        -dataFile File
+        -indexFile File
+        -bloomFile File
+        -config SSTableConfig
+        -offset int64
+        -index IndexEntry[]
+        -bloomFilter BloomFilter
         +Write(entry) error
         +Finalize() error
         +Size() int64
@@ -101,32 +101,32 @@ classDiagram
     }
     
     class SSTableReader {
-        -dataFile: *os.File
-        -indexFile: *os.File
-        -index: []IndexEntry
-        +Get(key) *KeyValueEntry
+        -dataFile File
+        -indexFile File
+        -index IndexEntry[]
+        +Get(key) KeyValueEntry
         +Close() error
     }
     
     class BloomFilter {
-        -bits: []bool
-        -size: uint64
-        -hashCount: uint64
+        -bits bool[]
+        -size uint64
+        -hashCount uint64
         +Add(key)
         +MayContain(key) bool
         +WriteTo(file) error
     }
     
     class CacheService {
-        -config: *CacheConfig
-        -cache: map[string]*CacheEntry
-        -evictionList: *EvictionList
-        -logger: *zap.Logger
-        -mu: sync.RWMutex
-        -currentSize: int64
-        -frequencyWeight: float64
-        -recencyWeight: float64
-        +Get(key) *CacheEntry, bool
+        -config CacheConfig
+        -cache map
+        -evictionList EvictionList
+        -logger Logger
+        -mu RWMutex
+        -currentSize int64
+        -frequencyWeight float64
+        -recencyWeight float64
+        +Get(key) CacheEntry
         +Put(key, value, vectorClock)
         +calculateScore(entry) float64
         +evictLowestScore()
@@ -135,106 +135,106 @@ classDiagram
     }
     
     class CompactionService {
-        -config: *CompactionConfig
-        -sstableService: *SSTableService
-        -logger: *zap.Logger
-        -jobQueue: chan *CompactionJob
-        -stopChan: chan struct{}
-        -wg: sync.WaitGroup
+        -config CompactionConfig
+        -sstableService SSTableService
+        -logger Logger
+        -jobQueue channel
+        -stopChan channel
+        -wg WaitGroup
         +compactionScheduler()
         +checkCompactionNeeded()
         +shouldCompactLevel(level) bool
         +triggerLevelCompaction(level)
         +compactionWorker(workerID)
         +executeCompaction(job)
-        +mergeSSTables(ctx, inputTables, outputLevel) *SSTableMetadata
+        +mergeSSTables(ctx, inputTables, outputLevel) SSTableMetadata
         +Stop()
     }
     
     class VectorClockService {
         +Increment(nodeID) VectorClock
-        +Merge(clocks...) VectorClock
+        +Merge(clocks) VectorClock
         +Compare(vc1, vc2) VectorClockComparison
     }
     
     class GossipService {
-        -config: *GossipConfig
-        -memberlist: *memberlist.Memberlist
-        -nodeID: string
-        -logger: *zap.Logger
-        -healthData: *HealthStatus
-        +NodeMeta(limit) []byte
+        -config GossipConfig
+        -memberlist Memberlist
+        -nodeID string
+        -logger Logger
+        -healthData HealthStatus
+        +NodeMeta(limit) byte[]
         +NotifyMsg(data)
-        +GetBroadcasts(overhead, limit) [][]byte
-        +LocalState(join) []byte
+        +GetBroadcasts(overhead, limit) byte[][]
+        +LocalState(join) byte[]
         +MergeRemoteState(buf, join)
         +UpdateHealthStatus(metrics)
         +Shutdown() error
     }
     
     class KeyValueEntry {
-        +TenantID: string
-        +Key: string
-        +Value: []byte
-        +VectorClock: VectorClock
-        +Timestamp: int64
+        +TenantID string
+        +Key string
+        +Value byte[]
+        +VectorClock VectorClock
+        +Timestamp int64
     }
     
     class MemTableEntry {
-        +Key: string
-        +Value: []byte
-        +VectorClock: VectorClock
-        +Timestamp: int64
+        +Key string
+        +Value byte[]
+        +VectorClock VectorClock
+        +Timestamp int64
     }
     
     class CacheEntry {
-        +Key: string
-        +Value: []byte
-        +VectorClock: VectorClock
-        +AccessCount: int64
-        +LastAccess: time.Time
-        +Score: float64
+        +Key string
+        +Value byte[]
+        +VectorClock VectorClock
+        +AccessCount int64
+        +LastAccess Time
+        +Score float64
     }
     
     class CommitLogEntry {
-        +TenantID: string
-        +Key: string
-        +Value: []byte
-        +VectorClock: VectorClock
-        +Timestamp: int64
-        +OperationType: OperationType
+        +TenantID string
+        +Key string
+        +Value byte[]
+        +VectorClock VectorClock
+        +Timestamp int64
+        +OperationType OperationType
     }
     
     class SSTableMetadata {
-        +SSTableID: string
-        +TenantID: string
-        +Level: int
-        +Size: int64
-        +KeyRange: KeyRange
-        +CreatedAt: time.Time
-        +FilePath: string
-        +IndexPath: string
-        +BloomPath: string
+        +SSTableID string
+        +TenantID string
+        +Level int
+        +Size int64
+        +KeyRange KeyRange
+        +CreatedAt Time
+        +FilePath string
+        +IndexPath string
+        +BloomPath string
     }
     
     class CompactionJob {
-        +JobID: string
-        +Level: SSTableLevel
-        +InputTables: []*SSTableMetadata
-        +OutputLevel: SSTableLevel
-        +StartedAt: time.Time
-        +Status: CompactionStatus
+        +JobID string
+        +Level SSTableLevel
+        +InputTables SSTableMetadata[]
+        +OutputLevel SSTableLevel
+        +StartedAt Time
+        +Status CompactionStatus
     }
     
     class HealthStatus {
-        +NodeID: string
-        +Status: NodeStatus
-        +Timestamp: int64
-        +Metrics: HealthMetrics
+        +NodeID string
+        +Status NodeStatus
+        +Timestamp int64
+        +Metrics HealthMetrics
     }
     
     class VectorClock {
-        +Entries: []VectorClockEntry
+        +Entries VectorClockEntry[]
     }
     
     StorageService --> CommitLogService : uses
