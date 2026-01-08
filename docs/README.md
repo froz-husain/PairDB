@@ -41,7 +41,7 @@ High-level design for the API Gateway service:
 - Error handling
 - Deployment considerations
 
-### 5. [API Gateway Low-Level Design](api-gateway/low-level-design.md)
+### 5.1. [API Gateway Low-Level Design](api-gateway/low-level-design.md)
 Very high-level low-level design for API Gateway implementation:
 - Package structure
 - Core components
@@ -49,13 +49,13 @@ Very high-level low-level design for API Gateway implementation:
 - Error handling
 - Testing strategy
 
-### 5.1. [API Gateway Class Diagram](api-gateway/class-diagram.md)
+### 5.2. [API Gateway Class Diagram](api-gateway/class-diagram.md)
 Class diagram showing:
 - Core entities and their relationships
 - Component interactions
 - Data structures
 
-### 5.2. [API Gateway Sequence Diagrams](api-gateway/sequence-diagrams.md)
+### 5.3. [API Gateway Sequence Diagrams](api-gateway/sequence-diagrams.md)
 Sequence diagrams for all flows:
 - Write Key-Value flow
 - Read Key-Value flow

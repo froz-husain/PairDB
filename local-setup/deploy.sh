@@ -124,5 +124,5 @@ echo "  kubectl logs -f -l app=coordinator -n pairdb"
 echo "  kubectl logs -f -l app=pairdb-storage-node -n pairdb"
 echo ""
 echo -e "${YELLOW}Note: Make sure Docker images are built and loaded into Minikube:${NC}"
-echo "  See local_setup/README.md for image building instructions"
+echo "  See local-setup/README.md for image building instructions"
 

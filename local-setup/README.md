@@ -61,7 +61,7 @@ This local setup deploys:
 ## Directory Structure
 
 ```
-local_setup/
+local-setup/
 ├── README.md                    # This file
 ├── deploy.sh                    # Main deployment script
 ├── cleanup.sh                   # Cleanup script

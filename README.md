@@ -157,7 +157,7 @@ The project uses **version tag `v1`** for Kubernetes deployments. Docker images 
 
 ### Local Development Setup
 
-For local development with Minikube, see the [Local Setup Guide](local_setup/README.md).
+For local development with Minikube, see the [Local Setup Guide](local-setup/README.md).
 
 ### Prerequisites
 
@@ -255,7 +255,7 @@ pairDB/
 │   ├── coordinator/     # Coordinator design docs
 │   └── storage-node/    # Storage Node design docs
 │
-└── local_setup/          # Local development setup
+└── local-setup/          # Local development setup
     ├── README.md        # Local setup guide
     ├── deploy.sh        # Deployment script
     └── k8s/             # Local Kubernetes manifests
@@ -297,5 +297,5 @@ Copyright DevRev 2024. All rights reserved.
 - [High-Level Design Document](docs/high-level-design.md)
 - [Requirements Document](docs/requirements.md)
 - [API Contracts](docs/api-contracts.md)
-- [Local Setup Guide](local_setup/README.md)
+- [Local Setup Guide](local-setup/README.md)
 
