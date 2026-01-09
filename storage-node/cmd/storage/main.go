@@ -131,6 +131,21 @@ func main() {
 		logger.Error("Failed to recover from commit log", zap.Error(err))
 	}
 
+	// Initialize streaming manager (Phase 2 - Cassandra pattern)
+	streamingMgr := service.NewStreamingManager(
+		storageSvc,
+		1000,  // batch size for bulk copy
+		10000, // stream buffer size
+		4,     // checksum workers
+		logger,
+	)
+	defer streamingMgr.Stop()
+
+	// Wire streaming manager to storage service (for live streaming)
+	storageSvc.SetStreamingManager(streamingMgr)
+
+	logger.Info("Streaming manager initialized and wired to storage service")
+
 	// Initialize gossip service if enabled
 	if cfg.Gossip.Enabled {
 		gossipSvc, err := service.NewGossipService(
@@ -154,7 +169,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	storageHandler := handler.NewStorageHandler(storageSvc, logger)
+	storageHandler := handler.NewStorageHandler(storageSvc, streamingMgr, logger)
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer(

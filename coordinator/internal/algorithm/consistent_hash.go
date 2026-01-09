@@ -166,3 +166,79 @@ func (ch *ConsistentHasher) NodeCount() int {
 	defer ch.mu.RUnlock()
 	return len(ch.nodeVNodes)
 }
+
+// GetAllVirtualNodes returns all virtual nodes in the ring
+func (ch *ConsistentHasher) GetAllVirtualNodes() []*model.VirtualNode {
+	ch.mu.RLock()
+	defer ch.mu.RUnlock()
+
+	vnodes := make([]*model.VirtualNode, 0, len(ch.ring))
+	for _, hash := range ch.ring {
+		vnodeID := ch.ringMap[hash]
+		nodeID := ch.extractNodeID(vnodeID)
+
+		vnodes = append(vnodes, &model.VirtualNode{
+			VNodeID: vnodeID,
+			Hash:    hash,
+			NodeID:  nodeID,
+		})
+	}
+
+	return vnodes
+}
+
+// GetNodeForHash returns the physical node ID that owns a given hash
+func (ch *ConsistentHasher) GetNodeForHash(keyHash uint64) string {
+	ch.mu.RLock()
+	defer ch.mu.RUnlock()
+
+	if len(ch.ring) == 0 {
+		return ""
+	}
+
+	// Find position in ring
+	idx := sort.Search(len(ch.ring), func(i int) bool {
+		return ch.ring[i] >= keyHash
+	})
+
+	// Wrap around if necessary
+	if idx >= len(ch.ring) {
+		idx = 0
+	}
+
+	hash := ch.ring[idx]
+	vnodeID := ch.ringMap[hash]
+	return ch.extractNodeID(vnodeID)
+}
+
+// GetPreviousHash returns the hash value that comes before the given hash in the ring
+func (ch *ConsistentHasher) GetPreviousHash(currentHash uint64) uint64 {
+	ch.mu.RLock()
+	defer ch.mu.RUnlock()
+
+	if len(ch.ring) == 0 {
+		return 0
+	}
+
+	// Find position of current hash
+	idx := -1
+	for i, hash := range ch.ring {
+		if hash == currentHash {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		// Hash not found, return 0
+		return 0
+	}
+
+	// Get previous hash (wrap around if at beginning)
+	prevIdx := idx - 1
+	if prevIdx < 0 {
+		prevIdx = len(ch.ring) - 1
+	}
+
+	return ch.ring[prevIdx]
+}

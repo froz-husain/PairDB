@@ -13,7 +13,17 @@ Complete functional and non-functional requirements for the system.
 - Component overviews (API Gateway, Coordinator, Storage Node, Metadata Store, Idempotency Store)
 - Technology stack summary
 - Key design decisions
+- **Phase 2 Streaming**: Cassandra-pattern node addition/removal with zero downtime
 - Simplified scalability considerations and edge case solutions
+
+### 2.1. [Phase 2 Streaming Architecture](PHASE2_STREAMING_ARCHITECTURE.md) **NEW**
+Comprehensive design for zero-downtime node topology changes:
+- Cassandra-pattern immediate ring integration
+- Hash-range based data transfer
+- Background monitoring with automatic rollback
+- Edge case handling (read staleness, quorum consistency, race conditions)
+- Complete API specifications for streaming operations
+- Node lifecycle management (`active`, `bootstrapping`, `draining`, `failed`)
 
 ### 3. [Use Case Diagram](use-case-diagram.md)
 Global use case diagram for pairDB showing:

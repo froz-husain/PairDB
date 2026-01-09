@@ -381,65 +381,146 @@ Client → API Gateway → Coordinator
 
 ### 7.2 Storage Node Scaling
 
-#### 7.2.1 Node Addition Process
+#### 7.2.1 Node Addition Process (Cassandra Pattern - Phase 2 Streaming)
 
 **API Call**: `POST /v1/admin/storage-nodes`
 
+**Implementation**: Phase 2 streaming approach inspired by Apache Cassandra's bootstrapping mechanism
+
 **Process Flow**:
-1. Admin calls API to add new storage node
-2. Coordinator validates node configuration
-3. Coordinator adds node to consistent hash ring (with virtual nodes)
-4. Coordinator initiates data migration:
-   - **Phase 1**: Dual-write phase - writes go to both old and new nodes
-   - **Phase 2**: Background data copy - existing data copied to new node
-   - **Phase 3**: Cutover - new node becomes primary for its key ranges
-   - **Phase 4**: Cleanup - old nodes removed from routing
-5. Migration progress tracked and checkpointed
-6. System continues operating during migration (minimal impact)
+1. **Immediate Ring Addition**: Admin calls API to add new storage node
+   - Coordinator validates node configuration (host, port, virtual nodes)
+   - Node is immediately added to consistent hash ring with `bootstrapping` status
+   - New node starts receiving writes immediately (even before historical data is transferred)
+
+2. **Parallel Streaming Initiation**: Coordinator calculates key ranges to transfer
+   - Uses consistent hashing to determine which key ranges move from old nodes to new node
+   - For each virtual node of the new node, identifies the previous owner
+   - Initiates parallel streaming from multiple old nodes simultaneously
+
+3. **Three-Phase Streaming**:
+   - **Bulk Copy Phase**: Old nodes scan their data (MemTable + SSTables) and send matching keys
+   - **Live Streaming Phase**: New writes during bulk copy are forwarded to new node via hinted handoff
+   - **Sync Verification Phase**: Final check to ensure all data is transferred
+
+4. **Background Monitoring**: Coordinator polls streaming status every 10 seconds
+   - Tracks completion per source node
+   - Aggregates progress (keys copied, keys streamed, bytes transferred)
+   - Timeout: 1 hour (360 attempts × 10s)
+
+5. **Automatic Transition**: When all streaming completes
+   - Node status automatically transitions from `bootstrapping` to `active`
+   - Streaming contexts cleaned up
+   - Node fully integrated into cluster
+
+6. **Rollback on Failure**: If streaming times out
+   - Node removed from hash ring
+   - Streaming operations stopped
+   - Node status set to `failed` (audit trail preserved)
+   - System continues operating normally
 
 **Request Handling During Addition**:
-- **Writes**: Routed to both old and new nodes (dual-write) during migration
-- **Reads**: Can read from either old or new nodes (prefers new if available)
-- **Quorum**: Calculated from both sets of replicas during dual-write phase
+- **Writes**:
+  - Immediately routed to new node (Cassandra pattern)
+  - Write-ahead via hinted handoff ensures no data loss
+  - New node participates in write quorum calculations
+- **Reads**:
+  - Bootstrapping nodes included in read queries
+  - Ensures read consistency during topology changes
+  - May return incomplete data initially (handled by read repair)
+- **Quorum**:
+  - Calculated based on active replicas only (excludes bootstrapping nodes)
+  - Prevents false quorum from nodes with incomplete data
+  - Automatically adjusted as nodes transition to active
 
-#### 7.2.2 Node Deletion Process
+#### 7.2.2 Node Deletion Process (Phase 2 Streaming)
 
 **API Call**: `DELETE /v1/admin/storage-nodes/{node_id}`
 
+**Implementation**: Phase 2 streaming approach with data replication before removal
+
 **Process Flow**:
-1. Admin calls API to remove storage node
-2. Coordinator validates node can be removed (sufficient replicas exist)
-3. Coordinator initiates data migration:
-   - **Phase 1**: Stop routing new writes to node being removed
-   - **Phase 2**: Verify remaining nodes have all data
-   - **Phase 3**: Replicate any missing data to other nodes
-   - **Phase 4**: Remove node from hash ring
-   - **Phase 5**: Node can be safely shut down
-4. Migration progress tracked and checkpointed
+1. **Validation**: Admin calls API to remove storage node
+   - Coordinator validates sufficient nodes remain after removal
+   - Minimum 3 active nodes required (configurable)
+   - Force flag available for emergency removals
+
+2. **Draining Phase**: Node marked as `draining`
+   - Node stops accepting new writes via hash ring
+   - Existing data must be transferred to inheriting nodes
+   - Node remains in ring temporarily for reads
+
+3. **Parallel Streaming to Inheritors**: Coordinator calculates inheriting nodes
+   - Determines which nodes will take over key ranges
+   - Initiates parallel streaming from draining node to multiple inheritors
+   - Each inheritor receives its designated key ranges
+
+4. **Background Monitoring**: Coordinator polls streaming status
+   - Tracks completion per inheriting node
+   - Monitors replication progress
+   - Timeout: 1 hour (360 attempts × 10s)
+
+5. **Complete Removal**: When all streaming completes
+   - Node removed from hash ring
+   - Node removed from metadata store
+   - Streaming contexts cleaned up
+   - Node can be safely shut down
+
+6. **Rollback on Failure**: If streaming times out
+   - Node reactivated (status changed back to `active`)
+   - Streaming operations stopped
+   - System continues with node still operational
+   - Admin alerted to retry or investigate
 
 **Request Handling During Deletion**:
-- **Writes**: Routed only to remaining nodes (node being removed excluded)
-- **Reads**: Routed only to remaining nodes
-- **Quorum**: Calculated from remaining nodes only
+- **Writes**: Routed only to remaining active nodes (draining node excluded)
+- **Reads**: Routed only to remaining active nodes
+- **Quorum**: Calculated from remaining active nodes only
+- **Validation**: Ensures minimum replicas maintained throughout process
 
-#### 7.2.3 Data Migration Details
+#### 7.2.3 Data Migration Details (Phase 2 Streaming)
 
 **Migration Coordination**:
-- Migration state stored in metadata store (PostgreSQL)
-- One coordinator acts as migration leader
-- All coordinators read migration state and update routing accordingly
+- Node status stored in metadata store (PostgreSQL): `active`, `bootstrapping`, `draining`, `failed`
+- Any coordinator can handle node operations (distributed coordination)
+- Topology lock prevents concurrent node additions/removals
+- Background goroutines monitor streaming progress
 
-**Migration APIs**:
-- Storage nodes expose migration APIs:
-  - `ReplicateData`: Copy data from one node to another
-  - `StreamKeys`: Efficiently stream keys for large datasets
-  - `DrainNode`: Prepare node for removal
+**Streaming APIs**:
+- Storage nodes expose streaming APIs:
+  - `StartStreaming`: Initiate key range streaming from source to target
+  - `GetStreamStatus`: Check streaming progress (keys copied, keys streamed, state)
+  - `StopStreaming`: Cleanup streaming context after completion
+  - `ReceiveStreamedData`: Accept streamed keys from source nodes
 
-**Migration Performance**:
-- Background migration to minimize impact on normal operations
-- Throttled bandwidth to avoid network saturation
-- Checkpointed progress for resumable migrations
-- Prioritized migration of frequently accessed keys
+**Key Range Calculation**:
+- **KeyRangeService**: Calculates which key ranges move between nodes
+- **Algorithm**:
+  1. Clone current hash ring
+  2. Add/remove target node from cloned ring
+  3. For each virtual node affected, determine old/new owner
+  4. Calculate hash ranges: [previousHash, currentHash)
+  5. Group ranges by source node for parallel streaming
+
+**Streaming Implementation**:
+- **Hash-based Scanning**: Storage nodes scan MemTable and SSTables by hash range
+- **Parallel Transfers**: Multiple source nodes stream to target simultaneously
+- **Live Forwarding**: New writes during streaming forwarded via hinted handoff
+- **Progress Tracking**: Coordinator aggregates status from all streaming operations
+
+**Performance Optimizations**:
+- Background streaming minimizes impact on normal operations
+- Throttling available to control bandwidth usage
+- No global cutover phase (Cassandra pattern)
+- Checkpointed progress via streaming status
+
+**Failure Handling**:
+- **Timeout**: 1-hour timeout with automatic rollback
+- **Rollback Logic**:
+  - Node addition: Remove from ring, mark as failed
+  - Node removal: Reactivate node, continue operations
+- **Cleanup**: Stop streaming, cleanup contexts, update metadata
+- **Audit Trail**: Failed operations preserved in metadata store
 
 **Commit Log**: Single commit log per node (sufficient for decent scale)
 **Compaction**: Background compaction process
@@ -453,7 +534,7 @@ Client → API Gateway → Coordinator
 - **TTL**: 24-hour TTL for idempotency keys (sufficient for retries)
 - **Eviction**: LRU eviction if memory pressure
 
-## 8. Edge Cases and Solutions (Simplified)
+## 8. Edge Cases and Solutions
 
 ### 8.1 Concurrent Writes with Same Idempotency Key
 - **Solution**: Redis distributed lock (SETNX) with 30-second timeout
@@ -474,6 +555,53 @@ Client → API Gateway → Coordinator
 ### 8.5 Partial Write Failures
 - **Solution**: Retry logic to reach quorum
 - **Store Idempotency**: Only store idempotency key after quorum reached
+
+### 8.6 Read Staleness During Node Addition
+- **Problem**: Bootstrapping nodes may not have complete historical data
+- **Solution**:
+  - Include bootstrapping nodes in read queries immediately
+  - Use read repair to detect and fix inconsistencies
+  - Eventual consistency guarantees convergence
+
+### 8.7 Race Conditions During Topology Changes
+- **Problem**: Concurrent node additions/removals can corrupt hash ring
+- **Solution**:
+  - Topology mutex prevents concurrent operations
+  - ConsistentHasher uses internal RWMutex for thread safety
+  - Serialized topology changes through single coordinator lock
+
+### 8.8 Quorum Calculation During Dual-Write
+- **Problem**: Bootstrapping nodes counted in quorum but may not have all data
+- **Solution**:
+  - Quorum calculated based on active replicas only
+  - Bootstrapping/draining nodes excluded from quorum count
+  - `CountActiveReplicas()` method filters by node status
+
+### 8.9 Migration Failure Recovery
+- **Problem**: Streaming can timeout or fail midway
+- **Solution**:
+  - **Node Addition**: Automatic rollback removes node, marks as failed
+  - **Node Removal**: Automatic rollback reactivates node
+  - 1-hour timeout with background monitoring
+  - Audit trail preserved in metadata store
+
+### 8.10 Insufficient Replicas After Node Removal
+- **Problem**: Removing node could drop below minimum replication requirements
+- **Solution**:
+  - Validation checks minimum 3 active nodes remain
+  - Removal blocked if insufficient nodes (unless force flag)
+  - Prevents data availability issues
+
+### 8.11 Read-Modify-Write Vector Clock Staleness
+- **Problem**: During node addition, read-modify-write may read stale data
+- **Solution**:
+  - Conflict detection via vector clock comparison
+  - Read repair triggered when conflicts detected
+  - System converges to consistency through anti-entropy
+
+### 8.12 Concurrent Addition and Deletion
+- **Problem**: Simultaneous add/remove operations can cause conflicts
+- **Solution**: Topology mutex serializes all node operations
 
 ## 9. Monitoring and Observability
 

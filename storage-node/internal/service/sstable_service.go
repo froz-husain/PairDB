@@ -174,6 +174,87 @@ func (s *SSTableService) Get(ctx context.Context, tenantID string, key string) (
 	return latestEntry, nil
 }
 
+// ScanKeysInRange scans keys in SSTables whose hash falls within the specified range
+// Used for streaming during node addition/removal
+func (s *SSTableService) ScanKeysInRange(ctx context.Context, startHash, endHash uint64, hashFunc func(string) uint64) ([]*model.KeyValueEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var results []*model.KeyValueEntry
+	seenKeys := make(map[string]int64) // key -> timestamp (for deduplication)
+
+	// Scan all levels from L0 to L4
+	for level := model.L0; level <= model.L4; level++ {
+		tables := s.levels[level]
+
+		for _, table := range tables {
+			// Open SSTable reader
+			reader, err := sstable.NewSSTableReader(table.FilePath, table.IndexPath)
+			if err != nil {
+				s.logger.Error("Failed to open sstable for scanning",
+					zap.String("sstable_id", table.SSTableID),
+					zap.Error(err))
+				continue
+			}
+
+			// Get all keys from this SSTable and check each one
+			keys := reader.GetAllKeys()
+			for _, key := range keys {
+				// Compute hash of the key
+				keyHash := hashFunc(key)
+
+				// Check if hash falls in range (handle wrap-around)
+				inRange := false
+				if endHash > startHash {
+					// Normal range: [startHash, endHash)
+					inRange = keyHash >= startHash && keyHash < endHash
+				} else {
+					// Wrap-around range: [startHash, MAX] or [0, endHash)
+					inRange = keyHash >= startHash || keyHash < endHash
+				}
+
+				if inRange {
+					// Get the entry
+					entry, err := reader.Get(key)
+					if err != nil || entry == nil {
+						continue
+					}
+
+					// Check if we've seen this key before
+					compositeKey := fmt.Sprintf("%s:%s", entry.TenantID, entry.Key)
+					if existingTS, seen := seenKeys[compositeKey]; seen {
+						// Keep the newer version
+						if entry.Timestamp > existingTS {
+							// Remove old version and add new one
+							for i, e := range results {
+								resultKey := fmt.Sprintf("%s:%s", e.TenantID, e.Key)
+								if resultKey == compositeKey {
+									results[i] = entry
+									seenKeys[compositeKey] = entry.Timestamp
+									break
+								}
+							}
+						}
+					} else {
+						// New key
+						results = append(results, entry)
+						seenKeys[compositeKey] = entry.Timestamp
+					}
+				}
+			}
+
+			reader.Close()
+		}
+	}
+
+	s.logger.Debug("Scanned SSTables for keys in range",
+		zap.Uint64("start_hash", startHash),
+		zap.Uint64("end_hash", endHash),
+		zap.Int("keys_found", len(results)))
+
+	return results, nil
+}
+
 // keyInRange checks if key falls within range
 func (s *SSTableService) keyInRange(key string, keyRange model.KeyRange) bool {
 	return key >= keyRange.StartKey && key <= keyRange.EndKey

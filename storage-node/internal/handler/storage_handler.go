@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/devrev/pairdb/storage-node/internal/model"
 	"github.com/devrev/pairdb/storage-node/internal/service"
@@ -13,16 +14,18 @@ import (
 
 // StorageHandler implements the gRPC storage service
 type StorageHandler struct {
-	storageService *service.StorageService
-	logger         *zap.Logger
+	storageService   *service.StorageService
+	streamingManager *service.StreamingManager // NEW: For Phase 2 streaming
+	logger           *zap.Logger
 	pb.UnimplementedStorageNodeServiceServer
 }
 
 // NewStorageHandler creates a new storage handler
-func NewStorageHandler(storageSvc *service.StorageService, logger *zap.Logger) *StorageHandler {
+func NewStorageHandler(storageSvc *service.StorageService, streamingMgr *service.StreamingManager, logger *zap.Logger) *StorageHandler {
 	return &StorageHandler{
-		storageService: storageSvc,
-		logger:         logger,
+		storageService:   storageSvc,
+		streamingManager: streamingMgr,
+		logger:           logger,
 	}
 }
 
@@ -360,4 +363,182 @@ func (h *StorageHandler) fromProtoVectorClock(vc *pb.VectorClock) model.VectorCl
 		}
 	}
 	return model.VectorClock{Entries: entries}
+}
+
+// ============================================================================
+// Streaming Management RPCs (Phase 2 - Cassandra Pattern)
+// ============================================================================
+
+// StartStreaming initiates streaming to a target node
+func (h *StorageHandler) StartStreaming(ctx context.Context, req *pb.StartStreamingRequest) (*pb.StartStreamingResponse, error) {
+	h.logger.Info("StartStreaming RPC received",
+		zap.String("source_node", req.SourceNodeId),
+		zap.String("target_node", req.TargetNodeId),
+		zap.Int("key_ranges", len(req.KeyRanges)))
+
+	// Validate request
+	if req.SourceNodeId == "" || req.TargetNodeId == "" {
+		return &pb.StartStreamingResponse{
+			Success: false,
+			Message: "source_node_id and target_node_id are required",
+		}, nil
+	}
+
+	if len(req.KeyRanges) == 0 {
+		return &pb.StartStreamingResponse{
+			Success: false,
+			Message: "at least one key range is required",
+		}, nil
+	}
+
+	// Convert proto key ranges to internal format
+	keyRanges := make([]service.KeyRange, len(req.KeyRanges))
+	for i, kr := range req.KeyRanges {
+		keyRanges[i] = service.KeyRange{
+			StartHash: kr.StartHash,
+			EndHash:   kr.EndHash,
+		}
+	}
+
+	// Create streaming context
+	streamCtx := &service.StreamContext{
+		TargetNodeID: req.TargetNodeId,
+		TargetHost:   req.TargetHost,
+		TargetPort:   int(req.TargetPort),
+		KeyRanges:    keyRanges,
+		State:        service.StreamStateCopying,
+	}
+
+	// Add to streaming manager
+	if err := h.streamingManager.AddStream(ctx, req.TargetNodeId, streamCtx); err != nil {
+		h.logger.Error("Failed to add streaming context",
+			zap.String("target_node", req.TargetNodeId),
+			zap.Error(err))
+		return &pb.StartStreamingResponse{
+			Success: false,
+			Message: fmt.Sprintf("failed to add streaming context: %v", err),
+		}, nil
+	}
+
+	// Start streaming in background
+	go func() {
+		if err := h.streamingManager.ExecuteStreaming(context.Background(), streamCtx); err != nil {
+			h.logger.Error("Streaming execution failed",
+				zap.String("target_node", req.TargetNodeId),
+				zap.Error(err))
+		}
+	}()
+
+	h.logger.Info("Streaming started successfully",
+		zap.String("source_node", req.SourceNodeId),
+		zap.String("target_node", req.TargetNodeId))
+
+	return &pb.StartStreamingResponse{
+		Success: true,
+		Message: "streaming started",
+	}, nil
+}
+
+// StopStreaming stops streaming to a target node
+func (h *StorageHandler) StopStreaming(ctx context.Context, req *pb.StopStreamingRequest) (*pb.StopStreamingResponse, error) {
+	h.logger.Info("StopStreaming RPC received",
+		zap.String("source_node", req.SourceNodeId),
+		zap.String("target_node", req.TargetNodeId))
+
+	// Validate request
+	if req.TargetNodeId == "" {
+		return &pb.StopStreamingResponse{
+			Success: false,
+			Message: "target_node_id is required",
+		}, nil
+	}
+
+	// Remove streaming context
+	h.streamingManager.RemoveStream(req.TargetNodeId)
+
+	h.logger.Info("Streaming stopped successfully",
+		zap.String("target_node", req.TargetNodeId))
+
+	return &pb.StopStreamingResponse{
+		Success: true,
+		Message: "streaming stopped",
+	}, nil
+}
+
+// GetStreamStatus returns the status of streaming to a target node
+func (h *StorageHandler) GetStreamStatus(ctx context.Context, req *pb.StreamStatusRequest) (*pb.StreamStatusResponse, error) {
+	h.logger.Debug("GetStreamStatus RPC received",
+		zap.String("target_node", req.TargetNodeId))
+
+	// Validate request
+	if req.TargetNodeId == "" {
+		return &pb.StreamStatusResponse{
+			Active: false,
+			State:  "error",
+		}, status.Error(codes.InvalidArgument, "target_node_id is required")
+	}
+
+	// Get streaming context
+	streamCtx, exists := h.streamingManager.GetStream(req.TargetNodeId)
+	if !exists {
+		return &pb.StreamStatusResponse{
+			Active: false,
+			State:  "not_found",
+		}, nil
+	}
+
+	// Return status (using getter methods for thread safety)
+	state := streamCtx.GetState()
+
+	return &pb.StreamStatusResponse{
+		Active:        state != service.StreamStateCompleted && state != service.StreamStateFailed,
+		State:         string(state),
+		KeysCopied:    streamCtx.KeysCopied,
+		KeysStreamed:  streamCtx.KeysStreamed,
+		BytesCopied:   streamCtx.BytesCopied,
+		BytesStreamed: streamCtx.BytesStreamed,
+	}, nil
+}
+
+// NotifyStreamingComplete is called by coordinator to acknowledge streaming completion
+func (h *StorageHandler) NotifyStreamingComplete(ctx context.Context, req *pb.StreamingCompleteRequest) (*pb.StreamingCompleteResponse, error) {
+	h.logger.Info("NotifyStreamingComplete RPC received",
+		zap.String("source_node", req.SourceNodeId),
+		zap.String("target_node", req.TargetNodeId))
+
+	// Validate request
+	if req.TargetNodeId == "" {
+		return &pb.StreamingCompleteResponse{
+			Success: false,
+			Message: "target_node_id is required",
+		}, nil
+	}
+
+	// Verify streaming exists and is complete
+	streamCtx, exists := h.streamingManager.GetStream(req.TargetNodeId)
+	if !exists {
+		return &pb.StreamingCompleteResponse{
+			Success: false,
+			Message: "no active streaming found for target node",
+		}, nil
+	}
+
+	state := streamCtx.GetState()
+	if state != service.StreamStateCompleted {
+		return &pb.StreamingCompleteResponse{
+			Success: false,
+			Message: fmt.Sprintf("streaming not completed, current state: %s", state),
+		}, nil
+	}
+
+	// Remove streaming context (cleanup)
+	h.streamingManager.RemoveStream(req.TargetNodeId)
+
+	h.logger.Info("Streaming completion acknowledged",
+		zap.String("target_node", req.TargetNodeId))
+
+	return &pb.StreamingCompleteResponse{
+		Success: true,
+		Message: "streaming completion acknowledged",
+	}, nil
 }

@@ -71,6 +71,72 @@ func (s *MemTableService) ShouldFlush() bool {
 	return s.memTable.Size() >= s.config.FlushThreshold
 }
 
+// ScanKeysInRange scans keys in the memtable whose hash falls within the specified range
+// Used for streaming during node addition/removal
+func (s *MemTableService) ScanKeysInRange(ctx context.Context, startHash, endHash uint64, hashFunc func(string) uint64) []*model.MemTableEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var results []*model.MemTableEntry
+
+	// Scan current memtable
+	iter := s.memTable.Iterator()
+	for iter.Next() {
+		entry := iter.Entry()
+		if entry == nil {
+			continue
+		}
+
+		// Compute hash of the key
+		keyHash := hashFunc(entry.Key)
+
+		// Check if hash falls in range (handle wrap-around)
+		inRange := false
+		if endHash > startHash {
+			// Normal range: [startHash, endHash)
+			inRange = keyHash >= startHash && keyHash < endHash
+		} else {
+			// Wrap-around range: [startHash, MAX] or [0, endHash)
+			inRange = keyHash >= startHash || keyHash < endHash
+		}
+
+		if inRange {
+			results = append(results, entry)
+		}
+	}
+
+	// Scan immutable memtable if exists
+	if s.immutableMT != nil {
+		iter := s.immutableMT.Iterator()
+		for iter.Next() {
+			entry := iter.Entry()
+			if entry == nil {
+				continue
+			}
+
+			keyHash := hashFunc(entry.Key)
+
+			inRange := false
+			if endHash > startHash {
+				inRange = keyHash >= startHash && keyHash < endHash
+			} else {
+				inRange = keyHash >= startHash || keyHash < endHash
+			}
+
+			if inRange {
+				results = append(results, entry)
+			}
+		}
+	}
+
+	s.logger.Debug("Scanned memtable for keys in range",
+		zap.Uint64("start_hash", startHash),
+		zap.Uint64("end_hash", endHash),
+		zap.Int("keys_found", len(results)))
+
+	return results
+}
+
 // Flush flushes memtable to SSTable
 func (s *MemTableService) Flush(ctx context.Context, sstableSvc *SSTableService) error {
 	s.flushMu.Lock()

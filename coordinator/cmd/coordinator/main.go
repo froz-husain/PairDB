@@ -98,6 +98,16 @@ func main() {
 	routingService := service.NewRoutingService(metadataStore, cfg.HashRing.VirtualNodes, cfg.HashRing.UpdateInterval, logger)
 	idempotencyService := service.NewIdempotencyService(idempotencyStore, 24*time.Hour, logger)
 	conflictService := service.NewConflictService(storageClient, vectorClockService, 10, cfg.Consistency.RepairAsync, logger)
+
+	// Initialize migration service for dual-write during node addition
+	migrationService := service.NewMigrationService(metadataStore, routingService, storageClient, logger)
+
+	// Initialize key range service for Phase 2 streaming
+	keyRangeService := service.NewKeyRangeService(logger)
+
+	// Initialize storage node client for Phase 2 streaming
+	storageNodeClient := client.NewStorageNodeClient(30*time.Second, logger)
+
 	coordinatorService := service.NewCoordinatorService(
 		tenantService,
 		routingService,
@@ -105,6 +115,7 @@ func main() {
 		idempotencyService,
 		conflictService,
 		vectorClockService,
+		migrationService,
 		storageClient,
 		cfg.Consistency.WriteTimeout,
 		cfg.Consistency.ReadTimeout,
@@ -116,7 +127,8 @@ func main() {
 	// Initialize handlers
 	kvHandler := handler.NewKeyValueHandler(coordinatorService, logger)
 	tenantHandler := handler.NewTenantHandler(tenantService, logger)
-	nodeHandler := handler.NewNodeHandler(metadataStore, routingService, logger)
+	// Use V2 handler with Phase 2 streaming support (Cassandra pattern)
+	nodeHandler := handler.NewNodeHandlerV2(metadataStore, routingService, keyRangeService, storageNodeClient, logger)
 
 	logger.Info("Handlers initialized")
 
@@ -226,7 +238,7 @@ type unifiedHandler struct {
 	pb.UnimplementedCoordinatorServiceServer
 	kvHandler     *handler.KeyValueHandler
 	tenantHandler *handler.TenantHandler
-	nodeHandler   *handler.NodeHandler
+	nodeHandler   *handler.NodeHandlerV2
 }
 
 func (h *unifiedHandler) WriteKeyValue(ctx context.Context, req *pb.WriteKeyValueRequest) (*pb.WriteKeyValueResponse, error) {

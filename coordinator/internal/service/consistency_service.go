@@ -21,8 +21,15 @@ func NewConsistencyService(defaultLevel string) *ConsistencyService {
 }
 
 // GetRequiredReplicas calculates the required number of replicas for a consistency level
+// Uses simple calculation (backward compatibility - treats all replicas as active)
 func (s *ConsistencyService) GetRequiredReplicas(consistency string, totalReplicas int) int {
-	return s.quorum.GetRequiredReplicas(consistency, totalReplicas)
+	return s.quorum.GetRequiredReplicasSimple(consistency, totalReplicas)
+}
+
+// GetRequiredReplicasWithStatus calculates required replicas accounting for node status
+// This is used during topology changes to exclude bootstrapping/draining nodes from quorum
+func (s *ConsistencyService) GetRequiredReplicasWithStatus(consistency string, totalReplicas, activeReplicas int) int {
+	return s.quorum.GetRequiredReplicas(consistency, totalReplicas, activeReplicas)
 }
 
 // ValidateConsistencyLevel validates if a consistency level is valid

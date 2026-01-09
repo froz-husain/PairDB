@@ -24,3 +24,26 @@ const (
 	// Concurrent means conflict (siblings)
 	Concurrent
 )
+
+// Equals checks if two vector clocks are identical
+func (vc VectorClock) Equals(other VectorClock) bool {
+	if len(vc.Entries) != len(other.Entries) {
+		return false
+	}
+
+	// Create map for quick lookup
+	vcMap := make(map[string]int64)
+	for _, entry := range vc.Entries {
+		vcMap[entry.CoordinatorNodeID] = entry.LogicalTimestamp
+	}
+
+	// Check if all entries in other match
+	for _, entry := range other.Entries {
+		timestamp, exists := vcMap[entry.CoordinatorNodeID]
+		if !exists || timestamp != entry.LogicalTimestamp {
+			return false
+		}
+	}
+
+	return true
+}

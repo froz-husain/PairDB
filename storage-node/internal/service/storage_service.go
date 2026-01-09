@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -16,6 +18,7 @@ type StorageService struct {
 	sstableService     *SSTableService
 	cacheService       *CacheService
 	vectorClockService *VectorClockService
+	streamingManager   *StreamingManager // NEW: For Phase 2 live streaming
 	logger             *zap.Logger
 	nodeID             string
 }
@@ -36,9 +39,15 @@ func NewStorageService(
 		sstableService:     sstableSvc,
 		cacheService:       cacheSvc,
 		vectorClockService: vectorClockSvc,
+		streamingManager:   nil, // Set later via SetStreamingManager()
 		logger:             logger,
 		nodeID:             nodeID,
 	}
+}
+
+// SetStreamingManager sets the streaming manager (called after initialization to avoid circular dependency)
+func (s *StorageService) SetStreamingManager(streamingMgr *StreamingManager) {
+	s.streamingManager = streamingMgr
 }
 
 // Write handles write operations
@@ -93,6 +102,22 @@ func (s *StorageService) Write(
 
 	// Update cache
 	s.cacheService.Put(memTableKey, value, vectorClock)
+
+	// NEW: Phase 2 - Intercept write for live streaming
+	if s.streamingManager != nil {
+		// Compute key hash for range checking
+		keyHash := s.computeKeyHash(tenantID, key)
+
+		// Notify streaming manager (async, non-blocking)
+		s.streamingManager.InterceptWrite(
+			ctx,
+			tenantID,
+			key,
+			value,
+			vectorClock,
+			keyHash,
+		)
+	}
 
 	// Check if memtable needs flushing
 	if s.memTableService.ShouldFlush() {
@@ -257,6 +282,23 @@ func (s *StorageService) validateWrite(tenantID, key string, value []byte) error
 // buildKey creates composite key
 func (s *StorageService) buildKey(tenantID, key string) string {
 	return fmt.Sprintf("%s:%s", tenantID, key)
+}
+
+// computeKeyHash computes the hash of a key for consistent hashing
+// This is used by the streaming manager to determine if a key should be streamed
+// Uses SHA-256 to match coordinator's consistent hashing algorithm
+func (s *StorageService) computeKeyHash(tenantID, key string) uint64 {
+	// Create composite key
+	compositeKey := s.buildKey(tenantID, key)
+
+	// Use SHA-256 hash (same as consistent hashing in coordinator)
+	// This must match the algorithm in coordinator/internal/algorithm/consistent_hash.go
+	h := sha256.New()
+	h.Write([]byte(compositeKey))
+	hashBytes := h.Sum(nil)
+
+	// Convert first 8 bytes to uint64
+	return binary.BigEndian.Uint64(hashBytes[:8])
 }
 
 // WriteResponse represents the response from a write operation

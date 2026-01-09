@@ -73,7 +73,9 @@ func (s *RoutingService) GetReplicas(ctx context.Context, tenantID, key string, 
 			continue
 		}
 		for _, node := range storageNodes {
-			if node.NodeID == vnode.NodeID && node.Status == "active" {
+			// Include both active and bootstrapping nodes (Cassandra pattern)
+			// Bootstrapping nodes must be queryable for read consistency
+			if node.NodeID == vnode.NodeID && (node.Status == model.NodeStatusActive || node.Status == model.NodeStatusBootstrapping) {
 				nodes = append(nodes, node)
 				break
 			}
@@ -91,6 +93,18 @@ func (s *RoutingService) GetReplicas(ctx context.Context, tenantID, key string, 
 		zap.Int("resolved_nodes", len(nodes)))
 
 	return nodes, nil
+}
+
+// CountActiveReplicas counts only fully active replicas (excludes bootstrapping/draining)
+// Used for quorum calculation during topology changes
+func (s *RoutingService) CountActiveReplicas(nodes []*model.StorageNode) int {
+	activeCount := 0
+	for _, node := range nodes {
+		if node.Status == model.NodeStatusActive {
+			activeCount++
+		}
+	}
+	return activeCount
 }
 
 // refreshHashRing periodically refreshes the hash ring from metadata store
@@ -123,10 +137,11 @@ func (s *RoutingService) updateHashRing(ctx context.Context) error {
 		return fmt.Errorf("failed to list storage nodes: %w", err)
 	}
 
-	// Filter active nodes only
+	// Filter active nodes + bootstrapping nodes (Cassandra pattern)
+	// Bootstrapping nodes should receive writes immediately and be queryable for reads
 	activeNodes := make([]*model.StorageNode, 0)
 	for _, node := range nodes {
-		if node.Status == "active" {
+		if node.Status == model.NodeStatusActive || node.Status == model.NodeStatusBootstrapping {
 			activeNodes = append(activeNodes, node)
 		}
 	}
@@ -182,6 +197,28 @@ func (s *RoutingService) GetNodeCount() int {
 	defer s.mu.RUnlock()
 
 	return s.hashRing.NodeCount()
+}
+
+// GetHashRing returns a reference to the hash ring (for key range calculations)
+// Thread-safe: the hash ring itself uses RWMutex for internal operations
+// WARNING: Caller must hold the lock during the entire operation if atomicity is required
+func (s *RoutingService) GetHashRing() *algorithm.ConsistentHasher {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.hashRing
+}
+
+// GetHashRingSnapshot returns a snapshot of current hash ring state
+// This is safer for long-running operations as it doesn't hold locks
+func (s *RoutingService) GetHashRingSnapshot() *algorithm.ConsistentHasher {
+	// Since ConsistentHasher has its own internal locking,
+	// we just return the reference. The caller can safely use it
+	// as all operations on ConsistentHasher are thread-safe.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.hashRing
 }
 
 // Stop stops the routing service

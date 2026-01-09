@@ -22,9 +22,10 @@ type StorageNode struct {
 type NodeStatus string
 
 const (
-	NodeStatusActive   NodeStatus = "active"
-	NodeStatusDraining NodeStatus = "draining"
-	NodeStatusInactive NodeStatus = "inactive"
+	NodeStatusActive        NodeStatus = "active"
+	NodeStatusBootstrapping NodeStatus = "bootstrapping" // Node is receiving new writes but still copying old data
+	NodeStatusDraining      NodeStatus = "draining"
+	NodeStatusInactive      NodeStatus = "inactive"
 )
 
 // VirtualNode represents a virtual node in the hash ring

@@ -3,6 +3,7 @@ module github.com/devrev/pairdb/coordinator
 go 1.24.0
 
 require (
+	github.com/devrev/pairdb/storage-node v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.4.3
 	github.com/prometheus/client_golang v1.17.0
@@ -38,7 +39,7 @@ require (
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	go.uber.org/multierr v1.10.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/net v0.48.0 // indirect
@@ -48,3 +49,5 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/devrev/pairdb/storage-node => ../storage-node

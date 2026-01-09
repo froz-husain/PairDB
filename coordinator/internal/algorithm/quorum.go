@@ -14,7 +14,9 @@ func (q *QuorumCalculator) CalculateQuorum(totalReplicas int) int {
 }
 
 // GetRequiredReplicas returns the number of replicas required based on consistency level
-func (q *QuorumCalculator) GetRequiredReplicas(consistency string, totalReplicas int) int {
+// totalReplicas: total number of replicas including bootstrapping nodes
+// activeReplicas: number of fully active replicas (excludes bootstrapping/draining)
+func (q *QuorumCalculator) GetRequiredReplicas(consistency string, totalReplicas, activeReplicas int) int {
 	switch consistency {
 	case "one":
 		return 1
@@ -23,8 +25,19 @@ func (q *QuorumCalculator) GetRequiredReplicas(consistency string, totalReplicas
 	case "quorum":
 		fallthrough
 	default:
+		// Quorum should be calculated based on active replicas only
+		// This prevents counting bootstrapping nodes that may not have all data yet
+		if activeReplicas > 0 {
+			return q.CalculateQuorum(activeReplicas)
+		}
+		// Fallback to total replicas if no active replicas specified
 		return q.CalculateQuorum(totalReplicas)
 	}
+}
+
+// GetRequiredReplicasSimple returns required replicas using total count (backward compatibility)
+func (q *QuorumCalculator) GetRequiredReplicasSimple(consistency string, totalReplicas int) int {
+	return q.GetRequiredReplicas(consistency, totalReplicas, totalReplicas)
 }
 
 // IsQuorumReached checks if quorum is reached

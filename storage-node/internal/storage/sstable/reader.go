@@ -136,6 +136,15 @@ func (r *SSTableReader) HasKey(key string) bool {
 	return found
 }
 
+// GetAllKeys returns all keys in the SSTable
+func (r *SSTableReader) GetAllKeys() []string {
+	keys := make([]string, 0, len(r.index))
+	for key := range r.index {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 // Close closes the reader
 func (r *SSTableReader) Close() error {
 	var err error

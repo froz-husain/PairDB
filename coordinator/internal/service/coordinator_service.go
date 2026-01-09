@@ -20,6 +20,7 @@ type CoordinatorService struct {
 	idempotencyService *IdempotencyService
 	conflictService    *ConflictService
 	vcService          *VectorClockService
+	migrationService   *MigrationService
 	storageClient      *client.StorageClient
 	writeTimeout       time.Duration
 	readTimeout        time.Duration
@@ -54,6 +55,7 @@ func NewCoordinatorService(
 	idempotencyService *IdempotencyService,
 	conflictService *ConflictService,
 	vcService *VectorClockService,
+	migrationService *MigrationService,
 	storageClient *client.StorageClient,
 	writeTimeout, readTimeout time.Duration,
 	logger *zap.Logger,
@@ -65,6 +67,7 @@ func NewCoordinatorService(
 		idempotencyService: idempotencyService,
 		conflictService:    conflictService,
 		vcService:          vcService,
+		migrationService:   migrationService,
 		storageClient:      storageClient,
 		writeTimeout:       writeTimeout,
 		readTimeout:        readTimeout,
@@ -126,11 +129,54 @@ func (s *CoordinatorService) WriteKeyValue(
 		return nil, fmt.Errorf("failed to get replicas: %w", err)
 	}
 
-	// Generate new vector clock
-	vectorClock := s.vcService.Increment(tenantID)
+	// Read-Modify-Write: Read existing value and vector clock first
+	// This ensures causality is preserved across concurrent writes
+	var vectorClock model.VectorClock
+	existingValue, existingVC, err := s.readExistingValue(ctx, replicas, tenantID, key)
+	if err != nil {
+		// Key doesn't exist yet, create new vector clock
+		s.logger.Debug("Key not found, creating new vector clock",
+			zap.String("tenant_id", tenantID),
+			zap.String("key", key))
+		vectorClock = s.vcService.Increment(tenantID)
+	} else {
+		// Key exists, increment from existing vector clock to maintain causality
+		s.logger.Debug("Key found, incrementing from existing vector clock",
+			zap.String("tenant_id", tenantID),
+			zap.String("key", key),
+			zap.Any("existing_vc", existingVC))
+		vectorClock = s.vcService.IncrementFrom(existingVC)
 
-	// Write to replicas
-	result, err := s.writeToReplicas(ctx, replicas, tenantID, key, value, vectorClock, consistency)
+		// Log if value is being overwritten
+		if len(existingValue) > 0 {
+			s.logger.Info("Overwriting existing value",
+				zap.String("tenant_id", tenantID),
+				zap.String("key", key),
+				zap.Int("old_size", len(existingValue)),
+				zap.Int("new_size", len(value)))
+		}
+	}
+
+	// Check for active migrations and get additional dual-write nodes
+	additionalNodes := make([]*model.StorageNode, 0)
+	if s.migrationService != nil && s.migrationService.IsDualWriteActive() {
+		migrationNodes, err := s.migrationService.GetDualWriteNodes(ctx, tenantID, key, replicas)
+		if err != nil {
+			s.logger.Warn("Failed to get dual write nodes",
+				zap.String("tenant_id", tenantID),
+				zap.String("key", key),
+				zap.Error(err))
+		} else if len(migrationNodes) > 0 {
+			s.logger.Debug("Dual write active, writing to additional nodes",
+				zap.String("tenant_id", tenantID),
+				zap.String("key", key),
+				zap.Int("additional_nodes", len(migrationNodes)))
+			additionalNodes = migrationNodes
+		}
+	}
+
+	// Write to replicas with proper vector clock (includes dual write)
+	result, err := s.writeToReplicas(ctx, replicas, tenantID, key, value, vectorClock, consistency, additionalNodes)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +228,7 @@ func (s *CoordinatorService) ReadKeyValue(
 }
 
 // writeToReplicas writes to multiple replicas in parallel
+// additionalNodes parameter is for dual-write during migrations (optional, can be nil)
 func (s *CoordinatorService) writeToReplicas(
 	ctx context.Context,
 	replicas []*model.StorageNode,
@@ -189,49 +236,87 @@ func (s *CoordinatorService) writeToReplicas(
 	value []byte,
 	vectorClock model.VectorClock,
 	consistency string,
+	additionalNodes []*model.StorageNode,
 ) (*WriteResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.writeTimeout)
 	defer cancel()
 
 	requiredReplicas := s.consistencyService.GetRequiredReplicas(consistency, len(replicas))
 
+	// Combine regular replicas with additional dual-write nodes
+	allNodes := make([]*model.StorageNode, 0, len(replicas)+len(additionalNodes))
+	allNodes = append(allNodes, replicas...)
+
+	// Track which nodes are dual-write (for error handling)
+	dualWriteNodes := make(map[string]bool)
+	if len(additionalNodes) > 0 {
+		allNodes = append(allNodes, additionalNodes...)
+		for _, node := range additionalNodes {
+			dualWriteNodes[node.NodeID] = true
+		}
+	}
+
 	s.logger.Info("Writing to replicas",
 		zap.String("tenant_id", tenantID),
 		zap.String("key", key),
 		zap.Int("total_replicas", len(replicas)),
 		zap.Int("required_replicas", requiredReplicas),
+		zap.Int("dual_write_nodes", len(additionalNodes)),
 		zap.String("consistency", consistency))
 
-	// Write to replicas in parallel
-	responses := make([]*client.StorageResponse, 0, len(replicas))
+	// Write to all nodes (replicas + dual-write nodes) in parallel
+	responses := make([]*client.StorageResponse, 0, len(allNodes))
 	var mu sync.Mutex
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	for _, replica := range replicas {
-		replica := replica // Capture loop variable
+	for _, node := range allNodes {
+		node := node // Capture loop variable
+		isDualWrite := dualWriteNodes[node.NodeID]
+
 		g.Go(func() error {
-			resp, err := s.storageClient.Write(gctx, replica, tenantID, key, value, vectorClock)
+			resp, err := s.storageClient.Write(gctx, node, tenantID, key, value, vectorClock)
 			if err != nil {
-				s.logger.Warn("Write failed to replica",
-					zap.String("tenant_id", tenantID),
-					zap.String("key", key),
-					zap.String("node_id", replica.NodeID),
-					zap.Error(err))
+				if isDualWrite {
+					// Dual-write failures are less critical (log as debug)
+					s.logger.Debug("Dual-write failed to migration node (non-critical)",
+						zap.String("tenant_id", tenantID),
+						zap.String("key", key),
+						zap.String("node_id", node.NodeID),
+						zap.Error(err))
+				} else {
+					s.logger.Warn("Write failed to replica",
+						zap.String("tenant_id", tenantID),
+						zap.String("key", key),
+						zap.String("node_id", node.NodeID),
+						zap.Error(err))
+				}
+
 				// Don't return error, collect response
-				mu.Lock()
-				responses = append(responses, &client.StorageResponse{
-					NodeID:  replica.NodeID,
-					Success: false,
-					Error:   err,
-				})
-				mu.Unlock()
+				// Dual-write failures don't count toward quorum
+				if !isDualWrite {
+					mu.Lock()
+					responses = append(responses, &client.StorageResponse{
+						NodeID:  node.NodeID,
+						Success: false,
+						Error:   err,
+					})
+					mu.Unlock()
+				}
 				return nil
 			}
 
-			mu.Lock()
-			responses = append(responses, resp)
-			mu.Unlock()
+			// Collect successful responses (dual-write success doesn't count toward quorum)
+			if !isDualWrite {
+				mu.Lock()
+				responses = append(responses, resp)
+				mu.Unlock()
+			} else {
+				s.logger.Debug("Dual-write succeeded to migration node",
+					zap.String("tenant_id", tenantID),
+					zap.String("key", key),
+					zap.String("node_id", node.NodeID))
+			}
 			return nil
 		})
 	}
@@ -382,4 +467,82 @@ func (s *CoordinatorService) readFromReplicas(
 		Value:       latest.Value,
 		VectorClock: latest.VectorClock,
 	}, nil
+}
+
+// readExistingValue is a helper method to read the existing value and vector clock
+// Used for read-modify-write operations to maintain causality
+//
+// Edge Case Handling:
+// - During node addition, may read from bootstrapping node with incomplete data
+// - If stale data is read, vector clock will be older, creating a causal anomaly
+// - This is resolved by conflict detection and read repair on subsequent reads
+// - The system converges to consistency through gossip and anti-entropy
+func (s *CoordinatorService) readExistingValue(
+	ctx context.Context,
+	replicas []*model.StorageNode,
+	tenantID, key string,
+) ([]byte, model.VectorClock, error) {
+	// Use ONE consistency for internal read to minimize latency
+	// We only need one response to get the existing vector clock
+	// Note: Could use QUORUM for stronger guarantees at cost of latency
+	ctx, cancel := context.WithTimeout(ctx, s.readTimeout)
+	defer cancel()
+
+	s.logger.Debug("Reading existing value for write operation",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key))
+
+	// Read from first available replica
+	var mu sync.Mutex
+	var firstResponse *client.StorageResponse
+	responseReceived := false
+
+	g, gctx := errgroup.WithContext(ctx)
+
+	for _, replica := range replicas {
+		replica := replica // Capture loop variable
+		g.Go(func() error {
+			// Skip if we already got a response
+			mu.Lock()
+			if responseReceived {
+				mu.Unlock()
+				return nil
+			}
+			mu.Unlock()
+
+			resp, err := s.storageClient.Read(gctx, replica, tenantID, key)
+			if err != nil {
+				s.logger.Debug("Failed to read from replica",
+					zap.String("node_id", replica.NodeID),
+					zap.Error(err))
+				return nil // Don't fail, try other replicas
+			}
+
+			if resp.Success && resp.Found {
+				mu.Lock()
+				if !responseReceived {
+					firstResponse = resp
+					responseReceived = true
+				}
+				mu.Unlock()
+			}
+
+			return nil
+		})
+	}
+
+	// Wait for all or first successful read
+	_ = g.Wait()
+
+	if firstResponse == nil || !firstResponse.Found {
+		return nil, model.VectorClock{}, fmt.Errorf("key not found")
+	}
+
+	s.logger.Debug("Found existing value",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key),
+		zap.String("node_id", firstResponse.NodeID),
+		zap.Int("value_size", len(firstResponse.Value)))
+
+	return firstResponse.Value, firstResponse.VectorClock, nil
 }
