@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/devrev/pairdb/storage-node/internal/model"
+	"github.com/devrev/pairdb/storage-node/internal/util"
 )
 
 // SSTableReader reads data from an SSTable
@@ -45,7 +46,7 @@ func NewSSTableReader(dataPath, indexPath string) (*SSTableReader, error) {
 	return reader, nil
 }
 
-// loadIndex loads the index file into memory
+// loadIndex loads the index file into memory with checksum support
 func (r *SSTableReader) loadIndex() error {
 	for {
 		// Read key length
@@ -76,17 +77,28 @@ func (r *SSTableReader) loadIndex() error {
 			return err
 		}
 
+		// Read checksum (if present, backward compatible)
+		var checksum uint32
+		if err := binary.Read(r.indexFile, binary.LittleEndian, &checksum); err != nil {
+			// Backward compatibility: older files may not have checksums
+			if err != io.EOF {
+				return err
+			}
+			checksum = 0
+		}
+
 		r.index[key] = IndexEntry{
-			Key:    key,
-			Offset: offset,
-			Size:   size,
+			Key:      key,
+			Offset:   offset,
+			Size:     size,
+			Checksum: checksum,
 		}
 	}
 
 	return nil
 }
 
-// Get retrieves a value by key
+// Get retrieves a value by key with checksum validation
 func (r *SSTableReader) Get(key string) (*model.KeyValueEntry, error) {
 	// Check index
 	indexEntry, found := r.index[key]
@@ -105,10 +117,26 @@ func (r *SSTableReader) Get(key string) (*model.KeyValueEntry, error) {
 		return nil, fmt.Errorf("failed to read entry size: %w", err)
 	}
 
+	// Read checksum if present (backward compatible)
+	var checksum uint32
+	if indexEntry.Checksum != 0 {
+		if err := binary.Read(r.dataFile, binary.LittleEndian, &checksum); err != nil {
+			return nil, fmt.Errorf("failed to read checksum: %w", err)
+		}
+	}
+
 	// Read entry data
 	data := make([]byte, entrySize)
 	if _, err := io.ReadFull(r.dataFile, data); err != nil {
 		return nil, fmt.Errorf("failed to read entry data: %w", err)
+	}
+
+	// Validate checksum if present
+	if indexEntry.Checksum != 0 {
+		if !util.ValidateChecksum(data, checksum) {
+			return nil, fmt.Errorf("checksum validation failed for key %s: expected %d, got %d",
+				key, checksum, util.ComputeChecksum(data))
+		}
 	}
 
 	// Deserialize entry
@@ -127,6 +155,7 @@ func (r *SSTableReader) Get(key string) (*model.KeyValueEntry, error) {
 		Value:       memEntry.Value,
 		VectorClock: memEntry.VectorClock,
 		Timestamp:   memEntry.Timestamp,
+		IsTombstone: memEntry.IsTombstone,
 	}, nil
 }
 

@@ -105,12 +105,12 @@ func (s *CoordinatorServiceV2) WriteKeyValue(
 		return nil, fmt.Errorf("failed to get tenant configuration: %w", err)
 	}
 
-	// Get replica nodes from hash ring
+	// Get write replica nodes (includes NORMAL, BOOTSTRAPPING, LEAVING)
 	// KEY CHANGE: Ring already includes bootstrapping nodes!
 	// No need to check migration state or get additional nodes
-	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
+	replicas, err := s.routingService.GetWriteReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get replicas: %w", err)
+		return nil, fmt.Errorf("failed to get write replicas: %w", err)
 	}
 
 	// Read-Modify-Write: Read existing value and vector clock first
@@ -171,10 +171,10 @@ func (s *CoordinatorServiceV2) ReadKeyValue(
 		return nil, fmt.Errorf("failed to get tenant configuration: %w", err)
 	}
 
-	// Get replica nodes (includes bootstrapping nodes)
-	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
+	// Get read replica nodes (includes NORMAL, BOOTSTRAPPING, LEAVING)
+	replicas, err := s.routingService.GetReadReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get replicas: %w", err)
+		return nil, fmt.Errorf("failed to get read replicas: %w", err)
 	}
 
 	// Read from replicas with read repair
@@ -194,7 +194,8 @@ func (s *CoordinatorServiceV2) writeToReplicasWithHints(
 	ctx, cancel := context.WithTimeout(ctx, s.writeTimeout)
 	defer cancel()
 
-	requiredReplicas := s.consistencyService.GetRequiredReplicas(consistency, len(replicas))
+	// Cassandra-correct quorum calculation: based on authoritative replicas only
+	requiredReplicas := s.consistencyService.GetRequiredReplicasForWriteSet(consistency, replicas)
 
 	s.logger.Info("Writing to replicas",
 		zap.String("tenant_id", tenantID),

@@ -409,15 +409,453 @@ func CompareVectorClocks(vc1, vc2 VectorClock) ComparisonResult {
   - API keys
 - **Environment Variables**: For runtime configuration overrides
 
-## 13. Storage Node Lifecycle Management
+## 13. Hinted Handoff System (Phase 6)
 
-### 12.1 Overview
+### 13.1 Overview
+
+Hinted handoff ensures write durability during node failures by storing missed writes as "hints" and replaying them when the node recovers. This prevents data loss during temporary node unavailability.
+
+### 13.2 Core Components
+
+#### 13.2.1 HintStore Interface
+
+```go
+type HintStore interface {
+    StoreHint(ctx context.Context, hint *model.Hint) error
+    GetHintsForNode(ctx context.Context, targetNodeID string, limit int) ([]*model.Hint, error)
+    DeleteHint(ctx context.Context, hintID string) error
+    CleanupOldHints(ctx context.Context, ttl time.Duration) (int64, error)
+}
+```
+
+**Implementation**: PostgreSQL-backed storage (`PostgreSQLHintStore`)
+
+#### 13.2.2 Hint Model
+
+```go
+type Hint struct {
+    HintID       string
+    TargetNodeID string    // Node that missed the write
+    TenantID     string
+    Key          string
+    Value        []byte
+    VectorClock  string
+    Timestamp    time.Time
+    CreatedAt    time.Time
+    ReplayCount  int       // Number of replay attempts (max 3)
+}
+```
+
+### 13.3 Hint Creation Flow
+
+Hints are created automatically during write operations when a replica fails:
+
+1. Coordinator attempts write to all replicas
+2. If write fails to a replica (network error, node down, timeout):
+   - Create hint with write details
+   - Store hint in PostgreSQL hints table
+   - Continue with write if quorum is still reached
+3. Hint is queued for replay when node recovers
+
+**Key Point**: Hints do NOT block the write operation. If quorum is reached from other replicas, the write succeeds and the hint is replayed asynchronously.
+
+### 13.4 Hint Replay Service
+
+#### 13.4.1 Replay Triggers
+
+Hints are replayed in two scenarios:
+
+1. **During Bootstrap**: Before a node transitions to NORMAL state
+   - Node completes data streaming
+   - HintReplayService replays all hints for the node
+   - Only after successful replay does node become NORMAL
+   - If replay fails, bootstrap fails safely
+
+2. **Periodic Replay**: Background process checks for hints periodically
+   - Useful for nodes that go down and recover without bootstrap
+   - Not yet implemented (future enhancement)
+
+#### 13.4.2 Replay Configuration
+
+```go
+type HintReplayService struct {
+    batchSize      int           // 100 hints per batch
+    replayInterval time.Duration // 1 second between batches
+    maxRetries     int           // 3 retry attempts per hint
+}
+```
+
+#### 13.4.3 Replay Algorithm
+
+```
+For each hint in batch:
+1. Attempt to write hint to target node
+2. If successful:
+   - Delete hint from store
+   - Increment replayed counter
+3. If failed:
+   - Increment replay_count
+   - If replay_count >= maxRetries (3):
+     - Delete hint (give up after 3 attempts)
+   - Otherwise:
+     - Leave hint for next batch
+4. Wait 1 second between batches (rate limiting)
+```
+
+### 13.5 Hint Cleanup
+
+#### 13.5.1 Background Cleanup
+
+A background goroutine runs every hour to clean up old hints:
+
+```go
+func (s *HintReplayService) CleanupOldHints(ctx context.Context, ttl time.Duration)
+```
+
+**TTL**: 7 days (configurable)
+
+**Cleanup Criteria**:
+- Hints older than TTL
+- Hints with replay_count >= 3 (max retries exceeded)
+
+#### 13.5.2 Manual Cleanup
+
+Administrators can manually clean up hints for dead nodes:
+
+```sql
+DELETE FROM hints WHERE target_node_id = '<dead-node-id>';
+```
+
+### 13.6 Database Schema
+
+```sql
+CREATE TABLE hints (
+    hint_id VARCHAR(255) PRIMARY KEY,
+    target_node_id VARCHAR(255) NOT NULL,
+    tenant_id VARCHAR(255) NOT NULL,
+    key VARCHAR(255) NOT NULL,
+    value BYTEA NOT NULL,
+    vector_clock TEXT,
+    timestamp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    replay_count INT DEFAULT 0,
+    INDEX idx_hints_target_node (target_node_id),
+    INDEX idx_hints_created_at (created_at)
+);
+```
+
+## 14. Cleanup Safety System (Phase 7)
+
+### 14.1 Overview
+
+Cleanup safety prevents premature data deletion after topology changes by enforcing grace periods and quorum verification before any data cleanup.
+
+### 14.2 Core Components
+
+#### 14.2.1 CleanupService
+
+```go
+type CleanupService struct {
+    gracePeriod time.Duration // 24 hours default
+}
+```
+
+**Key Methods**:
+- `VerifyCleanupSafe()` - Checks if cleanup is safe
+- `ExecuteCleanup()` - Executes cleanup after verification
+- `ForceCleanup()` - Emergency override (bypasses safety checks)
+
+### 14.3 Safety Checks
+
+Before any data cleanup, the following checks must pass:
+
+#### Check 1: Change Completed
+- PendingChange status must be "completed"
+- Ensures topology change finished successfully
+
+#### Check 2: No Active Streaming
+- All streaming operations must be in "completed" state
+- Prevents cleanup while data is still being transferred
+
+#### Check 3: Grace Period Elapsed
+- Default: 24 hours (configurable)
+- Calculated from `CompletedAt` timestamp (not `LastUpdated`)
+- Provides safety window for detecting issues
+
+#### Check 4: Quorum Verification
+- For each affected token range:
+  - Get current replicas for the range
+  - Verify quorum of replicas have the data
+  - Quorum = (RF / 2) + 1
+- Ensures data is safely replicated before cleanup
+
+### 14.4 CompletedAt Tracking
+
+The `PendingChange` model includes a `CompletedAt` field for accurate grace period tracking:
+
+```go
+type PendingChange struct {
+    ChangeID      string
+    Type          string
+    Status        PendingChangeStatus
+    LastUpdated   time.Time
+    CompletedAt   time.Time  // Set when status → "completed"
+    // ...
+}
+```
+
+**Why CompletedAt is Important**:
+- `LastUpdated` changes during progress updates
+- `CompletedAt` is set once when change completes
+- Grace period calculated from `CompletedAt` for precision
+
+### 14.5 Cleanup Flow
+
+```
+1. Topology change completes
+2. NodeHandlerV2 sets CompletedAt timestamp
+3. NodeHandlerV2 calls CleanupService.ScheduleCleanup()
+4. CleanupService waits for grace period (24 hours)
+5. After grace period:
+   - VerifyCleanupSafe() runs all safety checks
+   - If all checks pass: ExecuteCleanup()
+   - If any check fails: Log error, skip cleanup
+6. After cleanup: Delete PendingChange record
+```
+
+### 14.6 Force Cleanup (Emergency)
+
+For emergency situations, administrators can force cleanup:
+
+```go
+func (s *CleanupService) ForceCleanup(ctx context.Context, changeID string, reason string) error
+```
+
+**WARNING**: Bypasses all safety checks. Use only when:
+- Node is permanently dead
+- Data loss is acceptable
+- Manual verification confirms safety
+
+All force cleanup operations are logged with reason.
+
+## 15. Concurrent Node Operations (Phase 8)
+
+### 15.1 Overview
+
+Phase 8 enables multiple nodes to bootstrap or decommission simultaneously by replacing coarse-grained global locking with per-node locks.
+
+### 15.2 Per-Node Locking
+
+#### 15.2.1 Previous Design (Phases 1-7)
+
+```go
+// OLD: Coarse-grained global lock
+type NodeHandlerV2 struct {
+    topologyMu sync.Mutex  // Blocks ALL operations
+}
+
+func (h *NodeHandlerV2) AddStorageNodeV2() {
+    h.topologyMu.Lock()    // Blocks all other adds/removes
+    defer h.topologyMu.Unlock()
+    // ... bootstrap logic
+}
+```
+
+**Problem**: Only ONE node operation at a time, even for different nodes.
+
+#### 15.2.2 New Design (Phase 8)
+
+```go
+// NEW: Per-node locking
+type NodeHandlerV2 struct {
+    nodeLocks sync.Map  // map[string]*sync.Mutex
+}
+
+func (h *NodeHandlerV2) acquireNodeLock(nodeID string) *sync.Mutex {
+    mu, _ := h.nodeLocks.LoadOrStore(nodeID, &sync.Mutex{})
+    return mu.(*sync.Mutex)
+}
+
+func (h *NodeHandlerV2) AddStorageNodeV2(req *pb.AddStorageNodeRequest) {
+    mu := h.acquireNodeLock(req.NodeId)  // Lock ONLY this node
+    mu.Lock()
+    defer mu.Unlock()
+    // ... bootstrap logic
+}
+```
+
+**Benefits**:
+- Bootstrap node-1 and node-2 simultaneously
+- Bootstrap node-1 while decommissioning node-3
+- No contention for different nodes
+- Better resource utilization
+
+### 15.3 Lock Acquisition
+
+The `acquireNodeLock()` method uses `sync.Map.LoadOrStore()` for thread-safe lock creation:
+
+```go
+func (h *NodeHandlerV2) acquireNodeLock(nodeID string) *sync.Mutex {
+    // LoadOrStore is atomic:
+    // - If nodeID exists: return existing mutex
+    // - If nodeID doesn't exist: store new mutex, return it
+    mu, _ := h.nodeLocks.LoadOrStore(nodeID, &sync.Mutex{})
+    return mu.(*sync.Mutex)
+}
+```
+
+### 15.4 Concurrency Scenarios
+
+#### Scenario 1: Concurrent Bootstraps (Different Nodes)
+```
+Time    Node-1          Node-2          Result
+----    ------          ------          ------
+T0      AddNode start   -               Lock node-1
+T1      Streaming...    AddNode start   Lock node-2
+T2      Streaming...    Streaming...    Both proceed concurrently
+T3      Complete        Streaming...    Unlock node-1
+T4      -               Complete        Unlock node-2
+```
+
+#### Scenario 2: Bootstrap + Decommission (Different Nodes)
+```
+Time    Node-1          Node-2          Result
+----    ------          ------          ------
+T0      AddNode start   -               Lock node-1
+T1      Streaming...    RemoveNode      Lock node-2
+T2      Streaming...    Streaming...    Both proceed concurrently
+```
+
+#### Scenario 3: Same Node (Serialized)
+```
+Time    Operation-1     Operation-2     Result
+----    -----------     -----------     ------
+T0      AddNode-X       -               Lock node-X
+T1      Streaming...    AddNode-X       Blocks on node-X lock
+T2      Complete        Still blocked   Unlock node-X
+T3      -               Now proceeds    Lock node-X
+```
+
+### 15.5 Implementation Changes
+
+**File**: `coordinator/internal/handler/node_handler_v2.go`
+
+**Changes**:
+- Added `nodeLocks sync.Map` field
+- Added `acquireNodeLock(nodeID string)` method
+- Updated `AddStorageNodeV2()` to use per-node lock
+- Updated `RemoveStorageNodeV2()` to use per-node lock
+
+## 16. Replica Selection and Quorum (Phases 3-5)
+
+### 16.1 Split Replica Selection
+
+The `RoutingService` provides separate methods for write and read replica selection:
+
+#### 16.1.1 GetWriteReplicas
+
+```go
+func (s *RoutingService) GetWriteReplicas(ctx context.Context, tenantID, key string, rf int) ([]*model.StorageNode, error)
+```
+
+**Returns nodes that should receive writes**:
+- NORMAL nodes: Authoritative owners
+- BOOTSTRAPPING nodes: Receive writes for PendingRanges
+- LEAVING nodes: Still receive writes until streaming completes
+
+**Why include BOOTSTRAPPING nodes?**
+- Cassandra-correct pattern
+- Ensures bootstrapping nodes get current writes
+- Prevents data gaps during bootstrap
+
+#### 16.1.2 GetReadReplicas
+
+```go
+func (s *RoutingService) GetReadReplicas(ctx context.Context, tenantID, key string, rf int) ([]*model.StorageNode, error)
+```
+
+**Returns nodes that should be queried for reads**:
+- NORMAL nodes: Authoritative owners
+- BOOTSTRAPPING nodes: May have incomplete data, but queryable
+- LEAVING nodes: Still has data until streaming completes
+
+**Why include BOOTSTRAPPING nodes?**
+- Provides consistency during bootstrap
+- Read repair will fix any missing data
+
+### 16.2 Authoritative Replica Concept
+
+For quorum calculation, only "authoritative" replicas count:
+
+```go
+func (s *RoutingService) GetAuthoritativeReplicas(nodes []*model.StorageNode) []*model.StorageNode {
+    authoritative := make([]*model.StorageNode, 0)
+    for _, node := range nodes {
+        if node.State == model.NodeStateNormal {
+            authoritative = append(authoritative, node)
+        }
+    }
+    return authoritative
+}
+```
+
+**Authoritative = NORMAL state only**
+
+**Non-authoritative**:
+- BOOTSTRAPPING nodes (receiving data, not yet authoritative)
+- LEAVING nodes (transferring data, no longer authoritative)
+
+### 16.3 Quorum Calculation
+
+The `ConsistencyService` calculates quorum from authoritative replicas only:
+
+```go
+func (s *ConsistencyService) GetRequiredReplicasForWriteSet(
+    consistency string,
+    writeReplicas []*model.StorageNode,
+) int {
+    // Count ONLY NORMAL state nodes
+    authoritativeCount := 0
+    for _, node := range writeReplicas {
+        if node.State == model.NodeStateNormal {
+            authoritativeCount++
+        }
+    }
+
+    // Calculate quorum from authoritative count
+    switch consistency {
+    case "one":
+        return 1
+    case "all":
+        return authoritativeCount  // ALL authoritative replicas
+    case "quorum":
+        return (authoritativeCount / 2) + 1  // Majority of authoritative
+    }
+}
+```
+
+**Example during bootstrap**:
+```
+Write Replicas: [Node-1 (NORMAL), Node-2 (NORMAL), Node-3 (BOOTSTRAPPING)]
+Authoritative Replicas: [Node-1, Node-2]
+Quorum: (2 / 2) + 1 = 2
+
+For QUORUM consistency:
+- Write to all 3 nodes (including BOOTSTRAPPING)
+- Require 2 successful writes (from NORMAL nodes)
+- If Node-3 write fails, hint is created
+- Write succeeds if Node-1 and Node-2 succeed
+```
+
+## 17. Storage Node Lifecycle Management
+
+### 17.1 Overview
 
 Coordinators manage the consistent hash ring and handle storage node addition/deletion. When nodes are added or removed, data must be migrated to maintain proper replication and distribution.
 
-### 12.2 Node Addition Process
+### 17.2 Node Addition Process
 
-#### 12.2.1 API Call Flow
+#### 17.2.1 API Call Flow
 
 **Admin calls**: `POST /v1/admin/storage-nodes`
 
@@ -429,7 +867,7 @@ Coordinators manage the consistent hash ring and handle storage node addition/de
 5. **Coordinator** initiates data migration process
 6. **Coordinator** returns migration ID to admin
 
-#### 12.2.2 Hash Ring Update
+#### 17.2.2 Hash Ring Update
 
 ```go
 // Pseudo-code for hash ring update
@@ -449,7 +887,7 @@ func AddNodeToRing(nodeID string, virtualNodes int) {
 }
 ```
 
-#### 12.2.3 Data Migration Process
+#### 17.2.3 Data Migration Process
 
 **Phase 1: Identify Keys to Migrate**
 - Coordinator scans hash ring to identify keys that should move to new node
@@ -476,7 +914,7 @@ func AddNodeToRing(nodeID string, virtualNodes int) {
 - After verification period, old nodes can be removed from routing
 - Old data can be deleted from old nodes (optional)
 
-#### 12.2.4 Request Handling During Node Addition
+#### 17.2.4 Request Handling During Node Addition
 
 **Write Requests**:
 - Coordinator routes writes to both old and new nodes (dual-write)
@@ -500,9 +938,9 @@ Write Request for Key K:
 5. Return success
 ```
 
-### 12.3 Node Deletion Process
+### 17.3 Node Deletion Process
 
-#### 12.3.1 API Call Flow
+#### 17.3.1 API Call Flow
 
 **Admin calls**: `DELETE /v1/admin/storage-nodes/{node_id}`
 
@@ -515,7 +953,7 @@ Write Request for Key K:
 4. **Coordinator** removes node from hash ring after migration
 5. **Coordinator** returns migration ID
 
-#### 12.3.2 Data Migration Process
+#### 17.3.2 Data Migration Process
 
 **Phase 1: Stop Routing to Node**
 - Coordinator stops routing new writes to node being removed
@@ -541,7 +979,7 @@ Write Request for Key K:
 - Node data can be deleted (optional)
 - Node removed from service discovery
 
-#### 12.3.3 Request Handling During Node Deletion
+#### 17.3.3 Request Handling During Node Deletion
 
 **Write Requests**:
 - Coordinator stops routing writes to node being removed
@@ -553,9 +991,9 @@ Write Request for Key K:
 - Reads from remaining replicas only
 - If node has unique data, coordinator triggers replication first
 
-### 12.4 Migration State Management
+### 17.4 Migration State Management
 
-#### 12.4.1 Migration State Storage
+#### 17.4.1 Migration State Storage
 
 Coordinators store migration state in metadata store:
 
@@ -580,7 +1018,7 @@ CREATE TABLE migration_checkpoints (
 );
 ```
 
-#### 12.4.2 Coordinator Coordination
+#### 17.4.2 Coordinator Coordination
 
 **Leader Election**:
 - One coordinator acts as migration leader
@@ -608,9 +1046,9 @@ CREATE TABLE migration_checkpoints (
 }
 ```
 
-### 12.5 Hash Ring Management
+### 17.5 Hash Ring Management
 
-#### 12.5.1 Ring State Storage
+#### 17.5.1 Ring State Storage
 
 Coordinators maintain hash ring state:
 
@@ -630,7 +1068,7 @@ type NodeInfo struct {
 }
 ```
 
-#### 12.5.2 Ring Update Propagation
+#### 17.5.2 Ring Update Propagation
 
 **Method 1: Metadata Store (Simple)**
 - Ring state stored in PostgreSQL
@@ -642,9 +1080,9 @@ type NodeInfo struct {
 - Coordinators subscribe to updates
 - Real-time propagation
 
-### 12.6 Internal APIs for Migration
+### 17.6 Internal APIs for Migration
 
-#### 12.6.1 Start Migration
+#### 17.6.1 Start Migration
 
 **Endpoint**: Internal API (not exposed to clients)
 
@@ -665,7 +1103,7 @@ message MigrationResponse {
 }
 ```
 
-#### 12.6.2 Get Migration Status
+#### 17.6.2 Get Migration Status
 
 **Endpoint**: Internal API
 
@@ -685,9 +1123,9 @@ message MigrationStatusResponse {
 }
 ```
 
-### 12.7 Error Handling
+### 17.7 Error Handling
 
-#### 12.7.1 Migration Failures
+#### 17.7.1 Migration Failures
 
 **Failure Scenarios**:
 - Node fails during migration
@@ -701,7 +1139,7 @@ message MigrationStatusResponse {
 - Manual intervention required for some failures
 - Rollback capability for node additions
 
-#### 12.7.2 Partial Migrations
+#### 17.7.2 Partial Migrations
 
 **Handling**:
 - Checkpoint progress regularly
@@ -709,15 +1147,15 @@ message MigrationStatusResponse {
 - Verify data integrity after migration
 - Retry failed key migrations
 
-### 12.8 Performance Considerations
+### 17.8 Performance Considerations
 
-#### 12.8.1 Migration Throttling
+#### 17.8.1 Migration Throttling
 
 - Limit migration bandwidth to avoid impacting normal operations
 - Prioritize frequently accessed keys
 - Background migration during low traffic periods
 
-#### 12.8.2 Request Impact
+#### 17.8.2 Request Impact
 
 - Minimal impact during dual-write phase (slightly higher latency)
 - No impact during background copy phase

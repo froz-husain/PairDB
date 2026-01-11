@@ -14,8 +14,17 @@ type StorageNode struct {
 	NodeID       string
 	Host         string
 	Port         int
-	Status       NodeStatus
+	Status       NodeStatus // Kept for backward compatibility
+	State        NodeState  // NEW: Use this for Cassandra-correct lifecycle
 	VirtualNodes int
+	Tokens       []uint64 // NEW: Actual token positions in the ring
+
+	// NEW: Bidirectional range tracking for Cassandra-correct topology changes
+	PendingRanges []PendingRangeInfo // Ranges being received (bootstrap or inheriting)
+	LeavingRanges []LeavingRangeInfo // Ranges being transferred (decommission)
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // NodeStatus represents the status of a storage node

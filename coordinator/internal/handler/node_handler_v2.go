@@ -23,9 +23,10 @@ type NodeHandlerV2 struct {
 	routingService     *service.RoutingService
 	keyRangeService    *service.KeyRangeService
 	storageNodeClient  *client.StorageNodeClient
+	hintReplayService  *service.HintReplayService
 	logger             *zap.Logger
 	streamPollInterval time.Duration
-	topologyMu         sync.Mutex // Prevents concurrent topology changes
+	nodeLocks          sync.Map // Phase 8: Per-node locks for concurrent operations (map[string]*sync.Mutex)
 }
 
 // NewNodeHandlerV2 creates a new Phase 2 node handler
@@ -34,6 +35,7 @@ func NewNodeHandlerV2(
 	routingService *service.RoutingService,
 	keyRangeService *service.KeyRangeService,
 	storageNodeClient *client.StorageNodeClient,
+	hintReplayService *service.HintReplayService,
 	logger *zap.Logger,
 ) *NodeHandlerV2 {
 	return &NodeHandlerV2{
@@ -41,9 +43,18 @@ func NewNodeHandlerV2(
 		routingService:     routingService,
 		keyRangeService:    keyRangeService,
 		storageNodeClient:  storageNodeClient,
+		hintReplayService:  hintReplayService,
 		logger:             logger,
 		streamPollInterval: 10 * time.Second,
+		nodeLocks:          sync.Map{}, // Initialize per-node locks map
 	}
+}
+
+// acquireNodeLock acquires a lock for a specific node
+// Phase 8: Enables concurrent operations on different nodes
+func (h *NodeHandlerV2) acquireNodeLock(nodeID string) *sync.Mutex {
+	mu, _ := h.nodeLocks.LoadOrStore(nodeID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
 }
 
 // AddStorageNode is the proto interface method that calls AddStorageNodeV2
@@ -67,9 +78,11 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 	ctx context.Context,
 	req *pb.AddStorageNodeRequest,
 ) (*pb.AddStorageNodeResponse, error) {
-	// Prevent concurrent topology changes (node addition/removal)
-	h.topologyMu.Lock()
-	defer h.topologyMu.Unlock()
+	// Phase 8: Per-node locking allows concurrent operations on different nodes
+	// Lock only this specific node to allow other nodes to be added/removed concurrently
+	mu := h.acquireNodeLock(req.NodeId)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Validate request
 	if req.NodeId == "" {
@@ -93,17 +106,21 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 		virtualNodes = 150
 	}
 
-	// Create storage node with bootstrapping status
-	// Phase 2: Node is immediately added to ring and receives writes
+	// Create storage node with BOOTSTRAPPING state
+	// CRITICAL: Node is NOT added to ring yet - Cassandra-correct pattern
+	// Node will receive writes ONLY after being added to ring following bootstrap completion
 	node := &model.StorageNode{
 		NodeID:       req.NodeId,
 		Host:         req.Host,
 		Port:         int(req.Port),
-		Status:       model.NodeStatusBootstrapping, // NEW: Bootstrapping status
+		Status:       model.NodeStatusBootstrapping, // Kept for backward compatibility
+		State:        model.NodeStateBootstrapping,  // NEW: Use State for Cassandra-correct lifecycle
 		VirtualNodes: virtualNodes,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
-	// Add to metadata store
+	// Add to metadata store (but NOT to hash ring yet)
 	if err := h.metadataStore.AddStorageNode(ctx, node); err != nil {
 		h.logger.Error("Failed to add storage node to metadata",
 			zap.String("node_id", req.NodeId),
@@ -111,17 +128,9 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
-	// Add to hash ring IMMEDIATELY (Cassandra pattern)
-	// New node will start receiving writes via Phase 1 hinted handoff
-	if err := h.routingService.AddNode(ctx, node); err != nil {
-		h.logger.Error("Failed to add node to routing service",
-			zap.String("node_id", req.NodeId),
-			zap.Error(err))
-		return nil, status.Error(codes.Internal, "failed to add to hash ring: "+err.Error())
-	}
-
-	h.logger.Info("Node added to hash ring, calculating key ranges",
-		zap.String("node_id", req.NodeId))
+	h.logger.Info("Node added to metadata (NOT in ring yet), calculating key ranges",
+		zap.String("node_id", req.NodeId),
+		zap.String("state", string(node.State)))
 
 	// Calculate which key ranges will move to new node
 	hashRing := h.routingService.GetHashRing()
@@ -136,6 +145,66 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 	h.logger.Info("Key range calculation complete",
 		zap.String("node_id", req.NodeId),
 		zap.Int("affected_nodes", len(rangeAssignments)))
+
+	// Populate PendingRanges on new node (Cassandra-correct bidirectional tracking)
+	pendingRanges := make([]model.PendingRangeInfo, 0)
+	tokenRanges := make([]model.TokenRange, 0)
+	affectedNodeIDs := make([]string, 0, len(rangeAssignments))
+
+	for oldNodeID, ranges := range rangeAssignments {
+		affectedNodeIDs = append(affectedNodeIDs, oldNodeID)
+		for _, keyRange := range ranges {
+			tokenRange := model.TokenRange{
+				Start: keyRange.StartHash,
+				End:   keyRange.EndHash,
+			}
+			tokenRanges = append(tokenRanges, tokenRange)
+			pendingRanges = append(pendingRanges, model.PendingRangeInfo{
+				Range:          tokenRange,
+				OldOwnerID:     oldNodeID,
+				NewOwnerID:     node.NodeID,
+				StreamingState: "pending",
+			})
+		}
+	}
+
+	// Store PendingRanges in metadata
+	if err := h.metadataStore.UpdateNodeRanges(ctx, node.NodeID, pendingRanges, nil); err != nil {
+		h.logger.Error("Failed to update node pending ranges",
+			zap.String("node_id", req.NodeId),
+			zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to update pending ranges: "+err.Error())
+	}
+
+	h.logger.Info("PendingRanges populated",
+		zap.String("node_id", req.NodeId),
+		zap.Int("pending_ranges", len(pendingRanges)))
+
+	// Create PendingChange record for tracking and recovery
+	changeID := fmt.Sprintf("bootstrap-%s-%d", node.NodeID, time.Now().Unix())
+	pendingChange := &model.PendingChange{
+		ChangeID:      changeID,
+		Type:          "bootstrap",
+		NodeID:        node.NodeID,
+		AffectedNodes: affectedNodeIDs,
+		Ranges:        tokenRanges,
+		StartTime:     time.Now(),
+		Status:        model.PendingChangeInProgress,
+		LastUpdated:   time.Now(),
+		Progress:      make(map[string]model.StreamingProgress),
+	}
+
+	if err := h.metadataStore.AddPendingChange(ctx, pendingChange); err != nil {
+		h.logger.Error("Failed to create PendingChange record",
+			zap.String("node_id", req.NodeId),
+			zap.String("change_id", changeID),
+			zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to create pending change: "+err.Error())
+	}
+
+	h.logger.Info("PendingChange record created",
+		zap.String("node_id", req.NodeId),
+		zap.String("change_id", changeID))
 
 	// Initiate streaming from old nodes to new node
 	streamingStarted := 0
@@ -192,12 +261,12 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 	}
 
 	// Start background task to monitor streaming progress
-	go h.monitorStreamingProgress(context.Background(), node, rangeAssignments)
+	go h.monitorStreamingProgress(context.Background(), node, rangeAssignments, changeID)
 
 	return &pb.AddStorageNodeResponse{
 		Success: true,
 		NodeId:  node.NodeID,
-		Message: fmt.Sprintf("Node added successfully with bootstrapping status. Streaming initiated from %d nodes.", streamingStarted),
+		Message: fmt.Sprintf("Node added with BOOTSTRAPPING state (NOT in ring yet). Streaming initiated from %d nodes. Change ID: %s", streamingStarted, changeID),
 	}, nil
 }
 
@@ -206,9 +275,11 @@ func (h *NodeHandlerV2) RemoveStorageNodeV2(
 	ctx context.Context,
 	req *pb.RemoveStorageNodeRequest,
 ) (*pb.RemoveStorageNodeResponse, error) {
-	// Prevent concurrent topology changes (node addition/removal)
-	h.topologyMu.Lock()
-	defer h.topologyMu.Unlock()
+	// Phase 8: Per-node locking allows concurrent operations on different nodes
+	// Lock only this specific node to allow other nodes to be added/removed concurrently
+	mu := h.acquireNodeLock(req.NodeId)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Validate request
 	if req.NodeId == ""  {
@@ -257,7 +328,7 @@ func (h *NodeHandlerV2) RemoveStorageNodeV2(
 				activeNodeCount-1, minNodesRequired))
 	}
 
-	// Update node status to draining
+	// Update node status to draining (backward compatibility)
 	if err := h.metadataStore.UpdateStorageNodeStatus(ctx, req.NodeId, string(model.NodeStatusDraining)); err != nil {
 		h.logger.Error("Failed to update node status",
 			zap.String("node_id", req.NodeId),
@@ -265,8 +336,23 @@ func (h *NodeHandlerV2) RemoveStorageNodeV2(
 		return nil, status.Error(codes.Internal, "failed to update node status")
 	}
 
-	h.logger.Info("Node marked as draining",
-		zap.String("node_id", req.NodeId))
+	// CRITICAL: Update State to LEAVING (Cassandra-correct pattern)
+	// Node STAYS in ring during streaming - writes continue going to it
+	// This ensures no data loss during decommission
+	if err := h.metadataStore.UpdateNodeState(ctx, req.NodeId, model.NodeStateLeaving); err != nil {
+		h.logger.Error("Failed to update node state to LEAVING",
+			zap.String("node_id", req.NodeId),
+			zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to update node state")
+	}
+
+	h.logger.Info("Node marked as LEAVING (stays in ring during streaming)",
+		zap.String("node_id", req.NodeId),
+		zap.String("state", string(model.NodeStateLeaving)))
+
+	// NOTE: DO NOT force hash ring update here!
+	// Node MUST stay in ring during streaming to maintain write quorum
+	// Ring update happens AFTER streaming completes in monitorRemovalProgress()
 
 	// Calculate which nodes will inherit the key ranges
 	hashRing := h.routingService.GetHashRing()
@@ -281,6 +367,96 @@ func (h *NodeHandlerV2) RemoveStorageNodeV2(
 	h.logger.Info("Key range calculation complete for removal",
 		zap.String("node_id", req.NodeId),
 		zap.Int("inheriting_nodes", len(rangeAssignments)))
+
+	// Populate LeavingRanges on departing node (Cassandra-correct bidirectional tracking)
+	leavingRanges := make([]model.LeavingRangeInfo, 0)
+	tokenRanges := make([]model.TokenRange, 0)
+	affectedNodeIDs := make([]string, 0, len(rangeAssignments))
+
+	for inheritingNodeID, ranges := range rangeAssignments {
+		affectedNodeIDs = append(affectedNodeIDs, inheritingNodeID)
+		for _, keyRange := range ranges {
+			tokenRange := model.TokenRange{
+				Start: keyRange.StartHash,
+				End:   keyRange.EndHash,
+			}
+			tokenRanges = append(tokenRanges, tokenRange)
+			leavingRanges = append(leavingRanges, model.LeavingRangeInfo{
+				Range:          tokenRange,
+				OldOwnerID:     req.NodeId,
+				NewOwnerID:     inheritingNodeID,
+				StreamingState: "pending",
+			})
+		}
+	}
+
+	// Store LeavingRanges on departing node
+	if err := h.metadataStore.UpdateNodeRanges(ctx, req.NodeId, nil, leavingRanges); err != nil {
+		h.logger.Error("Failed to update node leaving ranges",
+			zap.String("node_id", req.NodeId),
+			zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to update leaving ranges: "+err.Error())
+	}
+
+	h.logger.Info("LeavingRanges populated on departing node",
+		zap.String("node_id", req.NodeId),
+		zap.Int("leaving_ranges", len(leavingRanges)))
+
+	// Populate PendingRanges on inheritor nodes (bidirectional tracking)
+	for inheritingNodeID, ranges := range rangeAssignments {
+		pendingRanges := make([]model.PendingRangeInfo, 0, len(ranges))
+		for _, keyRange := range ranges {
+			tokenRange := model.TokenRange{
+				Start: keyRange.StartHash,
+				End:   keyRange.EndHash,
+			}
+			pendingRanges = append(pendingRanges, model.PendingRangeInfo{
+				Range:          tokenRange,
+				OldOwnerID:     req.NodeId,
+				NewOwnerID:     inheritingNodeID,
+				StreamingState: "pending",
+			})
+		}
+
+		// Store PendingRanges on inheritor node
+		if err := h.metadataStore.UpdateNodeRanges(ctx, inheritingNodeID, pendingRanges, nil); err != nil {
+			h.logger.Warn("Failed to update inheritor node pending ranges",
+				zap.String("inheriting_node_id", inheritingNodeID),
+				zap.Error(err))
+			// Non-fatal: continue with other inheritors
+		} else {
+			h.logger.Info("PendingRanges populated on inheritor node",
+				zap.String("inheriting_node_id", inheritingNodeID),
+				zap.Int("pending_ranges", len(pendingRanges)))
+		}
+	}
+
+	// Create PendingChange record for tracking and recovery
+	changeID := fmt.Sprintf("decommission-%s-%d", req.NodeId, time.Now().Unix())
+	affectedNodeIDs = append(affectedNodeIDs, req.NodeId) // Include departing node in affected list
+	pendingChange := &model.PendingChange{
+		ChangeID:      changeID,
+		Type:          "decommission",
+		NodeID:        req.NodeId,
+		AffectedNodes: affectedNodeIDs,
+		Ranges:        tokenRanges,
+		StartTime:     time.Now(),
+		Status:        model.PendingChangeInProgress,
+		LastUpdated:   time.Now(),
+		Progress:      make(map[string]model.StreamingProgress),
+	}
+
+	if err := h.metadataStore.AddPendingChange(ctx, pendingChange); err != nil {
+		h.logger.Error("Failed to create PendingChange record",
+			zap.String("node_id", req.NodeId),
+			zap.String("change_id", changeID),
+			zap.Error(err))
+		return nil, status.Error(codes.Internal, "failed to create pending change: "+err.Error())
+	}
+
+	h.logger.Info("PendingChange record created for decommission",
+		zap.String("node_id", req.NodeId),
+		zap.String("change_id", changeID))
 
 	// Initiate streaming from removed node to inheriting nodes
 	streamingStarted := 0
@@ -337,12 +513,12 @@ func (h *NodeHandlerV2) RemoveStorageNodeV2(
 	}
 
 	// Start background task to monitor streaming and complete removal
-	go h.monitorRemovalProgress(context.Background(), removedNode, rangeAssignments)
+	go h.monitorRemovalProgress(context.Background(), removedNode, rangeAssignments, changeID)
 
 	return &pb.RemoveStorageNodeResponse{
 		Success: true,
 		NodeId:  req.NodeId,
-		Message: fmt.Sprintf("Node marked as draining. Streaming initiated to %d inheriting nodes.", streamingStarted),
+		Message: fmt.Sprintf("Node marked as LEAVING (stays in ring). Streaming initiated to %d inheriting nodes. Change ID: %s", streamingStarted, changeID),
 	}, nil
 }
 
@@ -351,10 +527,12 @@ func (h *NodeHandlerV2) monitorRemovalProgress(
 	ctx context.Context,
 	removedNode *model.StorageNode,
 	rangeAssignments map[string][]service.KeyRange,
+	changeID string,
 ) {
 	h.logger.Info("Starting removal progress monitor",
 		zap.String("removed_node_id", removedNode.NodeID),
-		zap.Int("inheriting_nodes", len(rangeAssignments)))
+		zap.Int("inheriting_nodes", len(rangeAssignments)),
+		zap.String("change_id", changeID))
 
 	ticker := time.NewTicker(h.streamPollInterval)
 	defer ticker.Stop()
@@ -414,14 +592,29 @@ func (h *NodeHandlerV2) monitorRemovalProgress(
 		if allCompleted {
 			h.logger.Info("All streaming completed for removal, removing node from cluster",
 				zap.String("removed_node_id", removedNode.NodeID),
-				zap.Int("completed_streams", len(completedNodes)))
+				zap.Int("completed_streams", len(completedNodes)),
+				zap.String("change_id", changeID))
 
-			// Remove from hash ring
+			// CRITICAL: Remove from hash ring NOW (after streaming completes)
+			// This is the Cassandra-correct pattern: node stays in ring until all data transferred
 			if err := h.routingService.RemoveNode(ctx, removedNode.NodeID); err != nil {
 				h.logger.Error("Failed to remove node from hash ring",
 					zap.String("node_id", removedNode.NodeID),
 					zap.Error(err))
 				return
+			}
+
+			h.logger.Info("Node removed from hash ring after successful decommission",
+				zap.String("node_id", removedNode.NodeID))
+
+			// Clear PendingRanges on all inheritor nodes
+			for _, inheritingNodeID := range inheritingNodes {
+				if err := h.metadataStore.UpdateNodeRanges(ctx, inheritingNodeID, nil, nil); err != nil {
+					h.logger.Error("Failed to clear pending ranges on inheritor",
+						zap.String("inheriting_node_id", inheritingNodeID),
+						zap.Error(err))
+					// Non-fatal: continue with other operations
+				}
 			}
 
 			// Remove from metadata store
@@ -430,6 +623,19 @@ func (h *NodeHandlerV2) monitorRemovalProgress(
 					zap.String("node_id", removedNode.NodeID),
 					zap.Error(err))
 				return
+			}
+
+			// Update PendingChange status to completed with CompletedAt timestamp
+			pendingChange, err := h.metadataStore.GetPendingChange(ctx, changeID)
+			if err == nil {
+				pendingChange.Status = model.PendingChangeCompleted
+				pendingChange.CompletedAt = time.Now() // Phase 7: Track completion time for grace period
+				pendingChange.LastUpdated = time.Now()
+				if err := h.metadataStore.UpdatePendingChange(ctx, pendingChange); err != nil {
+					h.logger.Error("Failed to update PendingChange status",
+						zap.String("change_id", changeID),
+						zap.Error(err))
+				}
 			}
 
 			// Cleanup streaming contexts
@@ -447,8 +653,9 @@ func (h *NodeHandlerV2) monitorRemovalProgress(
 				}
 			}
 
-			h.logger.Info("Node successfully removed from cluster",
-				zap.String("node_id", removedNode.NodeID))
+			h.logger.Info("Node successfully removed from cluster: removed from ring, inheritors updated",
+				zap.String("node_id", removedNode.NodeID),
+				zap.String("change_id", changeID))
 
 			return
 		}
@@ -458,10 +665,11 @@ func (h *NodeHandlerV2) monitorRemovalProgress(
 	h.logger.Error("Removal monitor timeout reached, initiating rollback",
 		zap.String("node_id", removedNode.NodeID),
 		zap.Int("completed_nodes", len(completedNodes)),
-		zap.Int("total_nodes", len(inheritingNodes)))
+		zap.Int("total_nodes", len(inheritingNodes)),
+		zap.String("change_id", changeID))
 
 	// Rollback: Reactivate the node since removal failed
-	h.rollbackNodeRemoval(ctx, removedNode, inheritingNodes)
+	h.rollbackNodeRemoval(ctx, removedNode, inheritingNodes, changeID)
 }
 
 // rollbackNodeRemoval reactivates a node after failed removal
@@ -469,9 +677,11 @@ func (h *NodeHandlerV2) rollbackNodeRemoval(
 	ctx context.Context,
 	node *model.StorageNode,
 	inheritingNodes []string,
+	changeID string,
 ) {
 	h.logger.Warn("Rolling back failed node removal",
-		zap.String("node_id", node.NodeID))
+		zap.String("node_id", node.NodeID),
+		zap.String("change_id", changeID))
 
 	// Stop all streaming operations
 	for _, inheritingNodeID := range inheritingNodes {
@@ -488,15 +698,52 @@ func (h *NodeHandlerV2) rollbackNodeRemoval(
 		}
 	}
 
-	// Reactivate node (change status back to active)
-	if err := h.metadataStore.UpdateStorageNodeStatus(ctx, node.NodeID, string(model.NodeStatusActive)); err != nil {
-		h.logger.Error("Failed to reactivate node during rollback",
+	// Clear LeavingRanges on departing node
+	if err := h.metadataStore.UpdateNodeRanges(ctx, node.NodeID, nil, nil); err != nil {
+		h.logger.Error("Failed to clear leaving ranges during rollback",
 			zap.String("node_id", node.NodeID),
 			zap.Error(err))
 	}
 
-	h.logger.Info("Node removal rollback completed - node reactivated",
-		zap.String("node_id", node.NodeID))
+	// Clear PendingRanges on all inheritor nodes
+	for _, inheritingNodeID := range inheritingNodes {
+		if err := h.metadataStore.UpdateNodeRanges(ctx, inheritingNodeID, nil, nil); err != nil {
+			h.logger.Error("Failed to clear pending ranges on inheritor during rollback",
+				zap.String("inheriting_node_id", inheritingNodeID),
+				zap.Error(err))
+		}
+	}
+
+	// Reactivate node: change State back to NORMAL
+	if err := h.metadataStore.UpdateNodeState(ctx, node.NodeID, model.NodeStateNormal); err != nil {
+		h.logger.Error("Failed to reactivate node state during rollback",
+			zap.String("node_id", node.NodeID),
+			zap.Error(err))
+	}
+
+	// Update Status for backward compatibility
+	if err := h.metadataStore.UpdateStorageNodeStatus(ctx, node.NodeID, string(model.NodeStatusActive)); err != nil {
+		h.logger.Error("Failed to reactivate node status during rollback",
+			zap.String("node_id", node.NodeID),
+			zap.Error(err))
+	}
+
+	// Update PendingChange status to failed
+	pendingChange, err := h.metadataStore.GetPendingChange(ctx, changeID)
+	if err == nil {
+		pendingChange.Status = model.PendingChangeFailed
+		pendingChange.ErrorMessage = "Decommission timeout: streaming did not complete within 1 hour"
+		pendingChange.LastUpdated = time.Now()
+		if err := h.metadataStore.UpdatePendingChange(ctx, pendingChange); err != nil {
+			h.logger.Error("Failed to update PendingChange status during rollback",
+				zap.String("change_id", changeID),
+				zap.Error(err))
+		}
+	}
+
+	h.logger.Info("Node removal rollback completed - node reactivated to NORMAL",
+		zap.String("node_id", node.NodeID),
+		zap.String("change_id", changeID))
 }
 
 // monitorStreamingProgress monitors streaming and transitions node to active when complete
@@ -504,10 +751,12 @@ func (h *NodeHandlerV2) monitorStreamingProgress(
 	ctx context.Context,
 	newNode *model.StorageNode,
 	rangeAssignments map[string][]service.KeyRange,
+	changeID string,
 ) {
 	h.logger.Info("Starting streaming progress monitor",
 		zap.String("node_id", newNode.NodeID),
-		zap.Int("source_nodes", len(rangeAssignments)))
+		zap.Int("source_nodes", len(rangeAssignments)),
+		zap.String("change_id", changeID))
 
 	ticker := time.NewTicker(h.streamPollInterval)
 	defer ticker.Stop()
@@ -575,16 +824,70 @@ func (h *NodeHandlerV2) monitorStreamingProgress(
 		}
 
 		if allCompleted {
-			h.logger.Info("All streaming completed, transitioning node to active",
+			h.logger.Info("All streaming completed, replaying hints before NORMAL transition",
 				zap.String("node_id", newNode.NodeID),
-				zap.Int("completed_streams", len(completedNodes)))
+				zap.Int("completed_streams", len(completedNodes)),
+				zap.String("change_id", changeID))
 
-			// Update node status to active
+			// CRITICAL: Replay all hints before transitioning to NORMAL
+			// This ensures the node has all missed writes that occurred during bootstrap
+			if err := h.hintReplayService.ReplayHintsForNode(ctx, newNode); err != nil {
+				h.logger.Error("Failed to replay hints, aborting bootstrap",
+					zap.String("node_id", newNode.NodeID),
+					zap.Error(err))
+				// Rollback: hints not replayed, node not safe to activate
+				h.rollbackNodeAddition(ctx, newNode, sourceNodes, changeID)
+				return
+			}
+
+			h.logger.Info("Hints replayed successfully, adding node to ring",
+				zap.String("node_id", newNode.NodeID))
+
+			// CRITICAL: Add node to ring NOW (after bootstrap completes and hints replayed)
+			// This is the Cassandra-correct pattern: node receives writes only after it has all data
+			if err := h.routingService.AddNode(ctx, newNode); err != nil {
+				h.logger.Error("Failed to add node to ring after bootstrap",
+					zap.String("node_id", newNode.NodeID),
+					zap.Error(err))
+				return
+			}
+
+			h.logger.Info("Node added to hash ring after successful bootstrap",
+				zap.String("node_id", newNode.NodeID))
+
+			// Update node State to NORMAL (authoritative owner now)
+			if err := h.metadataStore.UpdateNodeState(ctx, newNode.NodeID, model.NodeStateNormal); err != nil {
+				h.logger.Error("Failed to update node state to NORMAL",
+					zap.String("node_id", newNode.NodeID),
+					zap.Error(err))
+				return
+			}
+
+			// Update Status for backward compatibility
 			if err := h.metadataStore.UpdateStorageNodeStatus(ctx, newNode.NodeID, string(model.NodeStatusActive)); err != nil {
 				h.logger.Error("Failed to update node status to active",
 					zap.String("node_id", newNode.NodeID),
 					zap.Error(err))
-				return
+			}
+
+			// Clear PendingRanges (bootstrap complete)
+			if err := h.metadataStore.UpdateNodeRanges(ctx, newNode.NodeID, nil, nil); err != nil {
+				h.logger.Error("Failed to clear pending ranges",
+					zap.String("node_id", newNode.NodeID),
+					zap.Error(err))
+			}
+
+			// Update PendingChange status to completed with CompletedAt timestamp
+			pendingChange, err := h.metadataStore.GetPendingChange(ctx, changeID)
+			if err == nil {
+				pendingChange.Status = model.PendingChangeCompleted
+				pendingChange.CompletedAt = time.Now() // Phase 7: Track completion time for grace period
+				pendingChange.LastUpdated = time.Now()
+				if err := h.metadataStore.UpdatePendingChange(ctx, pendingChange); err != nil {
+					h.logger.Error("Failed to update PendingChange status",
+						zap.String("change_id", changeID),
+						zap.Error(err))
+				}
 			}
 
 			// Notify all source nodes that streaming is complete (cleanup)
@@ -606,8 +909,9 @@ func (h *NodeHandlerV2) monitorStreamingProgress(
 				}
 			}
 
-			h.logger.Info("Node successfully bootstrapped and activated",
-				zap.String("node_id", newNode.NodeID))
+			h.logger.Info("Node successfully bootstrapped: State=NORMAL, in ring, authoritative",
+				zap.String("node_id", newNode.NodeID),
+				zap.String("change_id", changeID))
 
 			return
 		}
@@ -617,10 +921,11 @@ func (h *NodeHandlerV2) monitorStreamingProgress(
 	h.logger.Error("Streaming monitor timeout reached, initiating rollback",
 		zap.String("node_id", newNode.NodeID),
 		zap.Int("completed_nodes", len(completedNodes)),
-		zap.Int("total_nodes", len(sourceNodes)))
+		zap.Int("total_nodes", len(sourceNodes)),
+		zap.String("change_id", changeID))
 
 	// Rollback: Remove node from hash ring and metadata
-	h.rollbackNodeAddition(ctx, newNode, sourceNodes)
+	h.rollbackNodeAddition(ctx, newNode, sourceNodes, changeID)
 }
 
 // rollbackNodeAddition removes a partially bootstrapped node after streaming failure
@@ -628,9 +933,11 @@ func (h *NodeHandlerV2) rollbackNodeAddition(
 	ctx context.Context,
 	node *model.StorageNode,
 	sourceNodes []string,
+	changeID string,
 ) {
 	h.logger.Warn("Rolling back failed node addition",
-		zap.String("node_id", node.NodeID))
+		zap.String("node_id", node.NodeID),
+		zap.String("change_id", changeID))
 
 	// Stop all streaming operations
 	for _, sourceNodeID := range sourceNodes {
@@ -652,12 +959,7 @@ func (h *NodeHandlerV2) rollbackNodeAddition(
 		}
 	}
 
-	// Remove from hash ring
-	if err := h.routingService.RemoveNode(ctx, node.NodeID); err != nil {
-		h.logger.Error("Failed to remove node from hash ring during rollback",
-			zap.String("node_id", node.NodeID),
-			zap.Error(err))
-	}
+	// NOTE: Node was never added to ring, so no need to remove it
 
 	// Mark node as failed in metadata store (don't delete, keep for audit trail)
 	if err := h.metadataStore.UpdateStorageNodeStatus(ctx, node.NodeID, "failed"); err != nil {
@@ -666,8 +968,36 @@ func (h *NodeHandlerV2) rollbackNodeAddition(
 			zap.Error(err))
 	}
 
-	h.logger.Info("Node addition rollback completed",
-		zap.String("node_id", node.NodeID))
+	// Update State to DOWN
+	if err := h.metadataStore.UpdateNodeState(ctx, node.NodeID, model.NodeStateDown); err != nil {
+		h.logger.Error("Failed to update node state during rollback",
+			zap.String("node_id", node.NodeID),
+			zap.Error(err))
+	}
+
+	// Clear PendingRanges
+	if err := h.metadataStore.UpdateNodeRanges(ctx, node.NodeID, nil, nil); err != nil {
+		h.logger.Error("Failed to clear pending ranges during rollback",
+			zap.String("node_id", node.NodeID),
+			zap.Error(err))
+	}
+
+	// Update PendingChange status to failed
+	pendingChange, err := h.metadataStore.GetPendingChange(ctx, changeID)
+	if err == nil {
+		pendingChange.Status = model.PendingChangeFailed
+		pendingChange.ErrorMessage = "Bootstrap timeout: streaming did not complete within 1 hour"
+		pendingChange.LastUpdated = time.Now()
+		if err := h.metadataStore.UpdatePendingChange(ctx, pendingChange); err != nil {
+			h.logger.Error("Failed to update PendingChange status during rollback",
+				zap.String("change_id", changeID),
+				zap.Error(err))
+		}
+	}
+
+	h.logger.Info("Node addition rollback completed - node marked as failed",
+		zap.String("node_id", node.NodeID),
+		zap.String("change_id", changeID))
 }
 
 // getStorageNode retrieves a storage node by ID from metadata store

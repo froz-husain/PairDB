@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/devrev/pairdb/coordinator/internal/algorithm"
+	"github.com/devrev/pairdb/coordinator/internal/model"
 )
 
 // ConsistencyService manages consistency levels and quorum calculations
@@ -62,4 +63,38 @@ func (s *ConsistencyService) NormalizeConsistencyLevel(level string) (string, er
 func (s *ConsistencyService) IsQuorumReached(successCount, totalReplicas int, consistency string) bool {
 	required := s.GetRequiredReplicas(consistency, totalReplicas)
 	return successCount >= required
+}
+
+// GetRequiredReplicasForWriteSet calculates required replicas for write operations
+// This is Cassandra-correct: quorum is calculated from AUTHORITATIVE replicas only
+// - Excludes BOOTSTRAPPING nodes (they receive writes but don't count toward quorum)
+// - Excludes LEAVING nodes (they receive writes but don't count toward quorum)
+// - Only NORMAL nodes count as authoritative
+func (s *ConsistencyService) GetRequiredReplicasForWriteSet(consistency string, writeReplicas []*model.StorageNode) int {
+	// Count authoritative replicas (only NORMAL state)
+	authoritativeCount := 0
+	for _, node := range writeReplicas {
+		if node.State == model.NodeStateNormal {
+			authoritativeCount++
+		}
+	}
+
+	// Calculate required replicas based on consistency level
+	switch consistency {
+	case "one":
+		return 1
+	case "all":
+		// For ALL consistency during topology changes:
+		// ALL means all AUTHORITATIVE replicas, not including bootstrapping/leaving
+		return authoritativeCount
+	case "quorum":
+		fallthrough
+	default:
+		// Quorum calculated from authoritative replicas only
+		if authoritativeCount > 0 {
+			return s.quorum.CalculateQuorum(authoritativeCount)
+		}
+		// If no authoritative replicas, require at least one write to succeed
+		return 1
+	}
 }

@@ -2,12 +2,16 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/devrev/pairdb/coordinator/internal/client"
 	"github.com/devrev/pairdb/coordinator/internal/model"
+	"github.com/devrev/pairdb/coordinator/internal/store"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -22,6 +26,7 @@ type CoordinatorService struct {
 	vcService          *VectorClockService
 	migrationService   *MigrationService
 	storageClient      *client.StorageClient
+	hintStore          store.HintStore
 	writeTimeout       time.Duration
 	readTimeout        time.Duration
 	logger             *zap.Logger
@@ -57,6 +62,7 @@ func NewCoordinatorService(
 	vcService *VectorClockService,
 	migrationService *MigrationService,
 	storageClient *client.StorageClient,
+	hintStore store.HintStore,
 	writeTimeout, readTimeout time.Duration,
 	logger *zap.Logger,
 ) *CoordinatorService {
@@ -69,6 +75,7 @@ func NewCoordinatorService(
 		vcService:          vcService,
 		migrationService:   migrationService,
 		storageClient:      storageClient,
+		hintStore:          hintStore,
 		writeTimeout:       writeTimeout,
 		readTimeout:        readTimeout,
 		logger:             logger,
@@ -123,10 +130,10 @@ func (s *CoordinatorService) WriteKeyValue(
 		return nil, fmt.Errorf("failed to get tenant configuration: %w", err)
 	}
 
-	// Get replica nodes
-	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
+	// Get write replica nodes (includes NORMAL, BOOTSTRAPPING, LEAVING)
+	replicas, err := s.routingService.GetWriteReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get replicas: %w", err)
+		return nil, fmt.Errorf("failed to get write replicas: %w", err)
 	}
 
 	// Read-Modify-Write: Read existing value and vector clock first
@@ -217,10 +224,10 @@ func (s *CoordinatorService) ReadKeyValue(
 		return nil, fmt.Errorf("failed to get tenant configuration: %w", err)
 	}
 
-	// Get replica nodes
-	replicas, err := s.routingService.GetReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
+	// Get read replica nodes (includes NORMAL, BOOTSTRAPPING, LEAVING)
+	replicas, err := s.routingService.GetReadReplicas(ctx, tenantID, key, tenant.ReplicationFactor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get replicas: %w", err)
+		return nil, fmt.Errorf("failed to get read replicas: %w", err)
 	}
 
 	// Read from replicas
@@ -241,7 +248,8 @@ func (s *CoordinatorService) writeToReplicas(
 	ctx, cancel := context.WithTimeout(ctx, s.writeTimeout)
 	defer cancel()
 
-	requiredReplicas := s.consistencyService.GetRequiredReplicas(consistency, len(replicas))
+	// Cassandra-correct quorum calculation: based on authoritative replicas only
+	requiredReplicas := s.consistencyService.GetRequiredReplicasForWriteSet(consistency, replicas)
 
 	// Combine regular replicas with additional dual-write nodes
 	allNodes := make([]*model.StorageNode, 0, len(replicas)+len(additionalNodes))
@@ -290,6 +298,34 @@ func (s *CoordinatorService) writeToReplicas(
 						zap.String("key", key),
 						zap.String("node_id", node.NodeID),
 						zap.Error(err))
+
+					// CRITICAL: Store hint for failed write (only for non-dual-write nodes)
+					// This ensures missed writes are replayed when the node recovers
+					hint := &model.Hint{
+						HintID:       generateHintID(),
+						TargetNodeID: node.NodeID,
+						TenantID:     tenantID,
+						Key:          key,
+						Value:        value,
+						VectorClock:  vectorClockToString(vectorClock),
+						Timestamp:    time.Now(),
+						CreatedAt:    time.Now(),
+						ReplayCount:  0,
+					}
+
+					if hintErr := s.hintStore.StoreHint(gctx, hint); hintErr != nil {
+						s.logger.Error("Failed to store hint",
+							zap.String("target_node", node.NodeID),
+							zap.String("tenant_id", tenantID),
+							zap.String("key", key),
+							zap.Error(hintErr))
+					} else {
+						s.logger.Info("Stored hint for failed write",
+							zap.String("hint_id", hint.HintID),
+							zap.String("target_node", node.NodeID),
+							zap.String("tenant_id", tenantID),
+							zap.String("key", key))
+					}
 				}
 
 				// Don't return error, collect response
@@ -545,4 +581,20 @@ func (s *CoordinatorService) readExistingValue(
 		zap.Int("value_size", len(firstResponse.Value)))
 
 	return firstResponse.Value, firstResponse.VectorClock, nil
+}
+
+// generateHintID generates a unique hint ID
+func generateHintID() string {
+	bytes := make([]byte, 16)
+	rand.Read(bytes)
+	return "hint-" + hex.EncodeToString(bytes)
+}
+
+// vectorClockToString serializes a vector clock to JSON string
+func vectorClockToString(vc model.VectorClock) string {
+	bytes, err := json.Marshal(vc)
+	if err != nil {
+		return "{}"
+	}
+	return string(bytes)
 }

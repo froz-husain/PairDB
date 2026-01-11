@@ -7,10 +7,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/devrev/pairdb/storage-node/internal/config"
 	"github.com/devrev/pairdb/storage-node/internal/handler"
 	"github.com/devrev/pairdb/storage-node/internal/service"
+	"github.com/devrev/pairdb/storage-node/internal/storage/diskmanager"
+	"github.com/devrev/pairdb/storage-node/internal/util/workerpool"
 	pb "github.com/devrev/pairdb/storage-node/pkg/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -100,6 +103,24 @@ func main() {
 
 	vectorClockSvc := service.NewVectorClockService()
 
+	// Initialize disk manager for disk space monitoring
+	diskMgr, err := diskmanager.NewDiskManager(
+		diskmanager.DefaultConfig(cfg.Storage.SSTableDir),
+		logger,
+	)
+	if err != nil {
+		logger.Fatal("Failed to initialize disk manager", zap.Error(err))
+	}
+
+	// Initialize worker pool for background tasks
+	workerPool := workerpool.NewWorkerPool(&workerpool.Config{
+		Name:       "storage-pool",
+		MaxWorkers: 10,
+		QueueSize:  100,
+		Logger:     logger,
+	})
+	defer workerPool.Stop(30 * time.Second)
+
 	compactionSvc := service.NewCompactionService(
 		&service.CompactionConfig{
 			L0Trigger: cfg.Compaction.L0Trigger,
@@ -121,6 +142,8 @@ func main() {
 		sstableSvc,
 		cacheSvc,
 		vectorClockSvc,
+		diskMgr,
+		workerPool,
 		logger,
 		cfg.Server.NodeID,
 	)

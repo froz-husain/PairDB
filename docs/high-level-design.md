@@ -446,9 +446,11 @@ Client → API Gateway → Coordinator
    - Force flag available for emergency removals
 
 2. **Draining Phase**: Node marked as `draining`
-   - Node stops accepting new writes via hash ring
+   - Node status updated to `draining` in metadata store
+   - **CRITICAL**: Hash ring immediately updated via `ForceUpdateHashRing()` (synchronous)
+   - Node excluded from hash ring, stops accepting new writes
    - Existing data must be transferred to inheriting nodes
-   - Node remains in ring temporarily for reads
+   - Inheriting nodes (e.g., node D) immediately start receiving writes for reassigned key ranges
 
 3. **Parallel Streaming to Inheritors**: Coordinator calculates inheriting nodes
    - Determines which nodes will take over key ranges
@@ -602,6 +604,48 @@ Client → API Gateway → Coordinator
 ### 8.12 Concurrent Addition and Deletion
 - **Problem**: Simultaneous add/remove operations can cause conflicts
 - **Solution**: Topology mutex serializes all node operations
+
+### 8.13 "ALL" Consistency During Node Deletion - Hash Ring Update Race Condition
+- **Problem**: When node C is removed and replica set changes from [A, B, C] to [A, B, D]:
+  - Node C is marked as `draining` status in metadata store
+  - Hash ring is updated periodically (every 30 seconds by default)
+  - During this window, writes with "ALL" consistency still go to [A, B, C]
+  - Node D doesn't receive writes until the next periodic hash ring update
+  - This creates a race condition where new replica D misses writes for up to 30 seconds
+- **Solution**:
+  - **Immediate Hash Ring Update**: Call `ForceUpdateHashRing()` immediately after marking node as draining
+  - This ensures the hash ring is updated synchronously, excluding the draining node
+  - Writes are immediately redirected to the new replica set [A, B, D]
+  - No race condition window where draining node receives writes
+  - Implementation: `node_handler_v2.go` line 271-279, `routing_service.go` line 224-233
+
+**Flow Diagram:**
+```
+Without Fix (Race Condition):
+  1. Admin: DELETE /storage-nodes/C
+  2. Coordinator: Mark C as "draining" in metadata store
+  3. [TIME WINDOW: 0-30 seconds]
+     - Hash ring still contains C
+     - Write request arrives for key "user:123"
+     - GetReplicas() → [A, B, C]  ❌ Wrong! Should be [A, B, D]
+     - Write goes to A, B, C (D misses the write)
+  4. [After 30 seconds]
+     - Background updateHashRing() runs
+     - Hash ring updated: C excluded, D included
+     - Future writes go to [A, B, D] ✓
+
+With Fix (Immediate Update):
+  1. Admin: DELETE /storage-nodes/C
+  2. Coordinator: Mark C as "draining" in metadata store
+  3. Coordinator: ForceUpdateHashRing() ← NEW!
+     - Hash ring immediately updated: C excluded
+     - C's key ranges reassigned to D
+  4. Write request arrives for key "user:123"
+     - GetReplicas() → [A, B, D]  ✓ Correct!
+     - Write goes to A, B, D (all replicas receive write)
+```
+
+**Key Insight**: The fix ensures that once a node is marked as draining, the hash ring is immediately updated before any subsequent writes can occur, eliminating the race condition window.
 
 ## 9. Monitoring and Observability
 

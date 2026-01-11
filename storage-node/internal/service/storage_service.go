@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/devrev/pairdb/storage-node/internal/errors"
 	"github.com/devrev/pairdb/storage-node/internal/model"
+	"github.com/devrev/pairdb/storage-node/internal/storage/diskmanager"
+	"github.com/devrev/pairdb/storage-node/internal/util/workerpool"
+	"github.com/devrev/pairdb/storage-node/internal/validation"
 	"go.uber.org/zap"
 )
 
@@ -19,6 +23,9 @@ type StorageService struct {
 	cacheService       *CacheService
 	vectorClockService *VectorClockService
 	streamingManager   *StreamingManager // NEW: For Phase 2 live streaming
+	diskManager        *diskmanager.DiskManager
+	validator          *validation.Validator
+	workerPool         *workerpool.WorkerPool
 	logger             *zap.Logger
 	nodeID             string
 }
@@ -30,6 +37,8 @@ func NewStorageService(
 	sstableSvc *SSTableService,
 	cacheSvc *CacheService,
 	vectorClockSvc *VectorClockService,
+	diskMgr *diskmanager.DiskManager,
+	workerPool *workerpool.WorkerPool,
 	logger *zap.Logger,
 	nodeID string,
 ) *StorageService {
@@ -40,6 +49,9 @@ func NewStorageService(
 		cacheService:       cacheSvc,
 		vectorClockService: vectorClockSvc,
 		streamingManager:   nil, // Set later via SetStreamingManager()
+		diskManager:        diskMgr,
+		validator:          validation.NewValidator(),
+		workerPool:         workerPool,
 		logger:             logger,
 		nodeID:             nodeID,
 	}
@@ -50,7 +62,7 @@ func (s *StorageService) SetStreamingManager(streamingMgr *StreamingManager) {
 	s.streamingManager = streamingMgr
 }
 
-// Write handles write operations
+// Write handles write operations with validation and disk space checking
 func (s *StorageService) Write(
 	ctx context.Context,
 	tenantID string,
@@ -60,9 +72,24 @@ func (s *StorageService) Write(
 ) (*WriteResponse, error) {
 	startTime := time.Now()
 
-	// Validate inputs
-	if err := s.validateWrite(tenantID, key, value); err != nil {
-		return nil, fmt.Errorf("validation failed: %w", err)
+	// Validate inputs using comprehensive validator
+	if err := s.validator.ValidateWrite(tenantID, key, value, vectorClock); err != nil {
+		s.logger.Warn("Write validation failed",
+			zap.String("tenant_id", tenantID),
+			zap.String("key", key),
+			zap.Error(err))
+		return nil, err
+	}
+
+	// Check disk space before write
+	estimatedSize := validation.EstimateWriteSize(tenantID, key, value)
+	if err := s.diskManager.CheckBeforeWrite(estimatedSize); err != nil {
+		s.logger.Warn("Disk space check failed",
+			zap.String("tenant_id", tenantID),
+			zap.String("key", key),
+			zap.Uint64("estimated_size", estimatedSize),
+			zap.Error(err))
+		return nil, err
 	}
 
 	// Create commit log entry
@@ -81,7 +108,7 @@ func (s *StorageService) Write(
 			zap.String("tenant_id", tenantID),
 			zap.String("key", key),
 			zap.Error(err))
-		return nil, fmt.Errorf("commit log write failed: %w", err)
+		return nil, errors.CommitLogFailed("failed to append to commit log", err)
 	}
 
 	// Write to memtable
@@ -91,13 +118,14 @@ func (s *StorageService) Write(
 		Value:       value,
 		VectorClock: vectorClock,
 		Timestamp:   entry.Timestamp,
+		IsTombstone: false,
 	}
 
 	if err := s.memTableService.Put(ctx, memEntry); err != nil {
 		s.logger.Error("Failed to write to memtable",
 			zap.String("key", memTableKey),
 			zap.Error(err))
-		return nil, fmt.Errorf("memtable write failed: %w", err)
+		return nil, errors.MemTableFailed("failed to write to memtable", err)
 	}
 
 	// Update cache
@@ -119,9 +147,9 @@ func (s *StorageService) Write(
 		)
 	}
 
-	// Check if memtable needs flushing
+	// Check if memtable needs flushing - use worker pool to avoid goroutine leak
 	if s.memTableService.ShouldFlush() {
-		go s.triggerFlush()
+		s.triggerFlushAsync(ctx)
 	}
 
 	latency := time.Since(startTime)
@@ -161,6 +189,11 @@ func (s *StorageService) Read(
 
 	// Check memtable
 	if entry, found := s.memTableService.Get(ctx, memTableKey); found {
+		// Check if it's a tombstone
+		if entry.IsTombstone {
+			return nil, errors.KeyNotFound(tenantID, key)
+		}
+
 		s.logger.Debug("MemTable hit",
 			zap.String("tenant_id", tenantID),
 			zap.String("key", key))
@@ -183,11 +216,16 @@ func (s *StorageService) Read(
 			zap.String("tenant_id", tenantID),
 			zap.String("key", key),
 			zap.Error(err))
-		return nil, fmt.Errorf("sstable read failed: %w", err)
+		return nil, errors.SSTableFailed("sstable read failed", err)
 	}
 
 	if entry == nil {
-		return nil, fmt.Errorf("key not found")
+		return nil, errors.KeyNotFound(tenantID, key)
+	}
+
+	// Check if it's a tombstone
+	if entry.IsTombstone {
+		return nil, errors.KeyNotFound(tenantID, key)
 	}
 
 	// Update cache
@@ -206,6 +244,71 @@ func (s *StorageService) Read(
 		VectorClock: entry.VectorClock,
 		Source:      "sstable",
 	}, nil
+}
+
+// Delete handles delete operations using tombstones
+func (s *StorageService) Delete(
+	ctx context.Context,
+	tenantID string,
+	key string,
+	vectorClock model.VectorClock,
+) error {
+	startTime := time.Now()
+
+	// Validate inputs
+	if err := s.validator.ValidateTenantID(tenantID); err != nil {
+		return err
+	}
+	if err := s.validator.ValidateKey(key); err != nil {
+		return err
+	}
+
+	// Create delete entry (tombstone)
+	entry := &model.CommitLogEntry{
+		TenantID:      tenantID,
+		Key:           key,
+		Value:         nil, // Tombstone has no value
+		VectorClock:   vectorClock,
+		Timestamp:     time.Now().Unix(),
+		OperationType: model.OperationTypeDelete,
+	}
+
+	// Write to commit log
+	if err := s.commitLogService.Append(ctx, entry); err != nil {
+		s.logger.Error("Failed to write delete to commit log",
+			zap.String("tenant_id", tenantID),
+			zap.String("key", key),
+			zap.Error(err))
+		return errors.CommitLogFailed("failed to append delete to commit log", err)
+	}
+
+	// Write tombstone to memtable
+	memTableKey := s.buildKey(tenantID, key)
+	memEntry := &model.MemTableEntry{
+		Key:         memTableKey,
+		Value:       nil,
+		VectorClock: vectorClock,
+		Timestamp:   entry.Timestamp,
+		IsTombstone: true,
+	}
+
+	if err := s.memTableService.Put(ctx, memEntry); err != nil {
+		s.logger.Error("Failed to write tombstone to memtable",
+			zap.String("key", memTableKey),
+			zap.Error(err))
+		return errors.MemTableFailed("failed to write tombstone", err)
+	}
+
+	// Remove from cache
+	s.cacheService.Remove(memTableKey)
+
+	latency := time.Since(startTime)
+	s.logger.Debug("Delete completed",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key),
+		zap.Duration("latency", latency))
+
+	return nil
 }
 
 // Repair handles repair operations
@@ -228,7 +331,7 @@ func (s *StorageService) Repair(
 
 	// Write to commit log
 	if err := s.commitLogService.Append(ctx, entry); err != nil {
-		return fmt.Errorf("repair commit log failed: %w", err)
+		return errors.CommitLogFailed("repair commit log failed", err)
 	}
 
 	// Update memtable
@@ -238,10 +341,11 @@ func (s *StorageService) Repair(
 		Value:       value,
 		VectorClock: vectorClock,
 		Timestamp:   entry.Timestamp,
+		IsTombstone: false,
 	}
 
 	if err := s.memTableService.Put(ctx, memEntry); err != nil {
-		return fmt.Errorf("repair memtable failed: %w", err)
+		return errors.MemTableFailed("repair memtable failed", err)
 	}
 
 	// Update cache
@@ -254,14 +358,24 @@ func (s *StorageService) Repair(
 	return nil
 }
 
-// triggerFlush triggers memtable flush to SSTable
-func (s *StorageService) triggerFlush() {
-	ctx := context.Background()
+// triggerFlushAsync triggers memtable flush using worker pool to avoid goroutine leak
+func (s *StorageService) triggerFlushAsync(parentCtx context.Context) {
+	// Use worker pool to bound goroutine creation
+	task := workerpool.Task{
+		ID: fmt.Sprintf("flush-%d", time.Now().UnixNano()),
+		Fn: func(ctx context.Context) error {
+			s.logger.Info("Triggering memtable flush")
+			return s.memTableService.Flush(ctx, s.sstableService)
+		},
+		Context: parentCtx, // Propagate parent context properly
+	}
 
-	s.logger.Info("Triggering memtable flush")
-
-	if err := s.memTableService.Flush(ctx, s.sstableService); err != nil {
-		s.logger.Error("Memtable flush failed", zap.Error(err))
+	if !s.workerPool.TrySubmit(task) {
+		s.logger.Warn("Failed to submit flush task to worker pool, executing inline")
+		// Fallback: execute inline if worker pool is full
+		if err := s.memTableService.Flush(parentCtx, s.sstableService); err != nil {
+			s.logger.Error("Memtable flush failed", zap.Error(err))
+		}
 	}
 }
 

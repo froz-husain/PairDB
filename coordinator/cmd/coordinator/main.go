@@ -68,6 +68,12 @@ func main() {
 	}
 	logger.Info("Metadata store initialized")
 
+	// Get the PostgreSQL connection pool for shared use
+	pgMetadataStore, ok := metadataStore.(*store.PostgresMetadataStore)
+	if !ok {
+		logger.Fatal("Failed to cast metadata store to PostgresMetadataStore")
+	}
+
 	// Initialize idempotency store (Redis)
 	idempotencyStore, err := store.NewRedisIdempotencyStore(
 		cfg.Redis.Host,
@@ -84,6 +90,10 @@ func main() {
 	// Initialize cache (in-memory for now)
 	cache := store.NewInMemoryCache(cfg.Cache.MaxSize, logger)
 	logger.Info("Cache initialized")
+
+	// Initialize hint store (PostgreSQL) for hinted handoff
+	hintStore := store.NewPostgresHintStore(pgMetadataStore.GetPool())
+	logger.Info("Hint store initialized")
 
 	// Initialize storage client
 	storageClient := client.NewStorageClient(cfg.Consistency.WriteTimeout)
@@ -108,6 +118,9 @@ func main() {
 	// Initialize storage node client for Phase 2 streaming
 	storageNodeClient := client.NewStorageNodeClient(30*time.Second, logger)
 
+	// Initialize hint replay service for Phase 6 (hinted handoff)
+	hintReplayService := service.NewHintReplayService(hintStore, storageNodeClient, logger)
+
 	coordinatorService := service.NewCoordinatorService(
 		tenantService,
 		routingService,
@@ -117,6 +130,7 @@ func main() {
 		vectorClockService,
 		migrationService,
 		storageClient,
+		hintStore,
 		cfg.Consistency.WriteTimeout,
 		cfg.Consistency.ReadTimeout,
 		logger,
@@ -127,8 +141,8 @@ func main() {
 	// Initialize handlers
 	kvHandler := handler.NewKeyValueHandler(coordinatorService, logger)
 	tenantHandler := handler.NewTenantHandler(tenantService, logger)
-	// Use V2 handler with Phase 2 streaming support (Cassandra pattern)
-	nodeHandler := handler.NewNodeHandlerV2(metadataStore, routingService, keyRangeService, storageNodeClient, logger)
+	// Use V2 handler with Phase 2 streaming support (Cassandra pattern) and hint replay
+	nodeHandler := handler.NewNodeHandlerV2(metadataStore, routingService, keyRangeService, storageNodeClient, hintReplayService, logger)
 
 	logger.Info("Handlers initialized")
 
@@ -173,6 +187,14 @@ func main() {
 			logger.Error("Health check server failed", zap.Error(err))
 		}
 	}()
+
+	// Start hint cleanup background process (Phase 6: Hinted Handoff)
+	// Cleans up hints older than 7 days to prevent unbounded growth
+	hintTTL := 7 * 24 * time.Hour // 7 days
+	ctx := context.Background()
+	go hintReplayService.CleanupOldHints(ctx, hintTTL)
+	logger.Info("Started hint cleanup background process",
+		zap.Duration("ttl", hintTTL))
 
 	// Start gRPC server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)

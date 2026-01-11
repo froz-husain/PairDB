@@ -221,6 +221,179 @@ func (s *RoutingService) GetHashRingSnapshot() *algorithm.ConsistentHasher {
 	return s.hashRing
 }
 
+// ForceUpdateHashRing forces an immediate hash ring update
+// Used during node addition/removal to ensure ring is updated synchronously
+func (s *RoutingService) ForceUpdateHashRing(ctx context.Context) error {
+	s.logger.Info("Forcing immediate hash ring update")
+	if err := s.updateHashRing(ctx); err != nil {
+		return fmt.Errorf("failed to force update hash ring: %w", err)
+	}
+	s.logger.Info("Forced hash ring update completed")
+	return nil
+}
+
+// GetWriteReplicas returns replicas for write operations
+// During topology changes:
+// - NORMAL nodes: authoritative owners, receive writes
+// - BOOTSTRAPPING nodes: receive writes for ranges they will own (from PendingRanges)
+// - LEAVING nodes: still receive writes until streaming completes
+func (s *RoutingService) GetWriteReplicas(ctx context.Context, tenantID, key string, replicationFactor int) ([]*model.StorageNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create composite key for consistent hashing
+	compositeKey := fmt.Sprintf("%s:%s", tenantID, key)
+	keyHash := s.hashRing.Hash(compositeKey)
+
+	// Get virtual nodes from hash ring
+	vnodes := s.hashRing.GetNodes(keyHash, replicationFactor)
+	if len(vnodes) < replicationFactor {
+		return nil, fmt.Errorf("insufficient storage nodes: need %d, got %d", replicationFactor, len(vnodes))
+	}
+
+	// Resolve to storage nodes
+	nodes := make([]*model.StorageNode, 0, len(vnodes))
+	seenNodes := make(map[string]bool)
+
+	storageNodes, err := s.metadataStore.ListStorageNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list storage nodes: %w", err)
+	}
+
+	// Build node lookup map
+	nodeMap := make(map[string]*model.StorageNode)
+	for _, node := range storageNodes {
+		nodeMap[node.NodeID] = node
+	}
+
+	for _, vnode := range vnodes {
+		if seenNodes[vnode.NodeID] {
+			continue
+		}
+		seenNodes[vnode.NodeID] = true
+
+		node, ok := nodeMap[vnode.NodeID]
+		if !ok {
+			continue
+		}
+
+		// Include nodes that should receive writes:
+		// - NORMAL: authoritative owners
+		// - BOOTSTRAPPING: receiving ranges, should get writes immediately
+		// - LEAVING: still owns data until streaming completes
+		if node.State == model.NodeStateNormal ||
+			node.State == model.NodeStateBootstrapping ||
+			node.State == model.NodeStateLeaving {
+			nodes = append(nodes, node)
+		}
+	}
+
+	if len(nodes) < replicationFactor {
+		return nil, fmt.Errorf("failed to resolve all write replicas: need %d, got %d", replicationFactor, len(nodes))
+	}
+
+	s.logger.Debug("Resolved write replicas",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key),
+		zap.Int("replication_factor", replicationFactor),
+		zap.Int("resolved_nodes", len(nodes)))
+
+	return nodes, nil
+}
+
+// GetReadReplicas returns replicas for read operations
+// During topology changes:
+// - NORMAL nodes: authoritative owners, always readable
+// - BOOTSTRAPPING nodes: readable (may have incomplete data, read repair will fix)
+// - LEAVING nodes: readable until data is transferred
+func (s *RoutingService) GetReadReplicas(ctx context.Context, tenantID, key string, replicationFactor int) ([]*model.StorageNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Create composite key for consistent hashing
+	compositeKey := fmt.Sprintf("%s:%s", tenantID, key)
+	keyHash := s.hashRing.Hash(compositeKey)
+
+	// Get virtual nodes from hash ring
+	vnodes := s.hashRing.GetNodes(keyHash, replicationFactor)
+	if len(vnodes) < replicationFactor {
+		return nil, fmt.Errorf("insufficient storage nodes: need %d, got %d", replicationFactor, len(vnodes))
+	}
+
+	// Resolve to storage nodes
+	nodes := make([]*model.StorageNode, 0, len(vnodes))
+	seenNodes := make(map[string]bool)
+
+	storageNodes, err := s.metadataStore.ListStorageNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list storage nodes: %w", err)
+	}
+
+	// Build node lookup map
+	nodeMap := make(map[string]*model.StorageNode)
+	for _, node := range storageNodes {
+		nodeMap[node.NodeID] = node
+	}
+
+	for _, vnode := range vnodes {
+		if seenNodes[vnode.NodeID] {
+			continue
+		}
+		seenNodes[vnode.NodeID] = true
+
+		node, ok := nodeMap[vnode.NodeID]
+		if !ok {
+			continue
+		}
+
+		// Include all nodes that may have the data:
+		// - NORMAL: authoritative owners
+		// - BOOTSTRAPPING: included for consistency (read repair will detect missing data)
+		// - LEAVING: still has data until streaming completes
+		if node.State == model.NodeStateNormal ||
+			node.State == model.NodeStateBootstrapping ||
+			node.State == model.NodeStateLeaving {
+			nodes = append(nodes, node)
+		}
+	}
+
+	if len(nodes) < replicationFactor {
+		return nil, fmt.Errorf("failed to resolve all read replicas: need %d, got %d", replicationFactor, len(nodes))
+	}
+
+	s.logger.Debug("Resolved read replicas",
+		zap.String("tenant_id", tenantID),
+		zap.String("key", key),
+		zap.Int("replication_factor", replicationFactor),
+		zap.Int("resolved_nodes", len(nodes)))
+
+	return nodes, nil
+}
+
+// GetAuthoritativeReplicas returns only NORMAL state nodes (authoritative owners)
+// Used for quorum calculation during writes - excludes BOOTSTRAPPING and LEAVING
+func (s *RoutingService) GetAuthoritativeReplicas(nodes []*model.StorageNode) []*model.StorageNode {
+	authoritative := make([]*model.StorageNode, 0, len(nodes))
+	for _, node := range nodes {
+		if node.State == model.NodeStateNormal {
+			authoritative = append(authoritative, node)
+		}
+	}
+	return authoritative
+}
+
+// CountAuthoritativeReplicas counts only NORMAL state nodes
+// Used for quorum calculation - excludes BOOTSTRAPPING and LEAVING nodes
+func (s *RoutingService) CountAuthoritativeReplicas(nodes []*model.StorageNode) int {
+	count := 0
+	for _, node := range nodes {
+		if node.State == model.NodeStateNormal {
+			count++
+		}
+	}
+	return count
+}
+
 // Stop stops the routing service
 func (s *RoutingService) Stop() {
 	close(s.stopCh)

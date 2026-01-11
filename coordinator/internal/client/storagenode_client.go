@@ -85,6 +85,21 @@ type StreamStatusResponse struct {
 	BytesStreamed int64
 }
 
+// WriteRequest contains parameters for writing a key-value pair
+type WriteRequest struct {
+	TenantID    string
+	Key         string
+	Value       []byte
+	VectorClock string
+	Timestamp   time.Time
+}
+
+// WriteResponse contains the result of a write operation
+type WriteResponse struct {
+	Success bool
+	Message string
+}
+
 // StartStreaming instructs a source node to start streaming to a target node
 func (c *StorageNodeClient) StartStreaming(
 	ctx context.Context,
@@ -212,6 +227,56 @@ func (c *StorageNodeClient) GetStreamStatus(
 		KeysStreamed:  resp.KeysStreamed,
 		BytesCopied:   resp.BytesCopied,
 		BytesStreamed: resp.BytesStreamed,
+	}, nil
+}
+
+// Write writes a key-value pair to a storage node
+// Used for hint replay and direct writes
+func (c *StorageNodeClient) Write(
+	ctx context.Context,
+	node *model.StorageNode,
+	req *WriteRequest,
+) (*WriteResponse, error) {
+	client, err := c.getClient(node)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get client for node %s: %w", node.NodeID, err)
+	}
+
+	// Create vector clock for the write
+	// For simplicity, create a basic vector clock with timestamp
+	vectorClock := &pb.VectorClock{
+		Entries: []*pb.VectorClockEntry{
+			{
+				CoordinatorNodeId: "coordinator-1", // TODO: Use actual coordinator ID
+				LogicalTimestamp:  req.Timestamp.UnixNano(),
+			},
+		},
+	}
+
+	// Call Write RPC
+	grpcReq := &pb.WriteRequest{
+		TenantId:    req.TenantID,
+		Key:         req.Key,
+		Value:       req.Value,
+		VectorClock: vectorClock,
+	}
+
+	grpcCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	resp, err := client.Write(grpcCtx, grpcReq)
+	if err != nil {
+		c.logger.Debug("Write RPC failed",
+			zap.String("node_id", node.NodeID),
+			zap.String("tenant_id", req.TenantID),
+			zap.String("key", req.Key),
+			zap.Error(err))
+		return nil, fmt.Errorf("Write RPC failed: %w", err)
+	}
+
+	return &WriteResponse{
+		Success: resp.Success,
+		Message: resp.ErrorMessage,
 	}, nil
 }
 

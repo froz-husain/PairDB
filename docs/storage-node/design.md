@@ -80,6 +80,52 @@ The Storage Node is a stateful service that stores and serves key-value data. It
 - Validate tenant_id on all operations
 - Separate data structures per tenant (logical separation)
 
+#### 3.2.8 Disk Manager
+- **Real-time disk space monitoring** with configurable check intervals
+- **Three-tier threshold system**:
+  - Warning threshold (default: 80%) - log warnings, no action
+  - Throttle threshold (default: 90%) - reject large writes, allow small writes
+  - Circuit breaker threshold (default: 95%) - reject all writes
+- **Write size estimation** before accepting operations
+- **Automatic recovery** when disk space becomes available
+- **Metrics** for monitoring disk usage, throttling events, and rejections
+
+#### 3.2.9 Validation Manager
+- **Pre-write validation pipeline** for all operations
+- **Size limit enforcement**:
+  - Key: max 1KB
+  - Value: max 10MB
+  - Tenant ID: max 256 bytes
+- **Security validation**:
+  - Prevent null byte injection attacks
+  - Block control characters in keys and tenant IDs
+  - Forbid ':' character in tenant IDs (reserved as separator)
+- **Vector clock validation**:
+  - Max 1000 entries per vector clock
+  - Max 128 bytes per coordinator node ID
+  - Non-negative logical timestamps
+- **Composite key validation** for tenant isolation
+
+#### 3.2.10 Worker Pool Manager
+- **Bounded goroutine pool** for background tasks with configurable size
+- **Task queueing** with configurable buffer size
+- **Panic recovery** to prevent worker crashes
+- **Error tracking** and logging for all tasks
+- **Graceful shutdown** with timeout for clean termination
+- **Used for**: memtable flushes, compaction, async streaming operations
+- **Metrics**: active workers, queue utilization, task success rate
+
+#### 3.2.11 Streaming Manager (Phase 2)
+- **Live data streaming** to new or existing nodes during migration
+- **Three-phase streaming process**:
+  1. Copy phase: bulk copy of historical data in batches
+  2. Stream phase: live streaming of new writes (write interception)
+  3. Sync phase: checksum verification and re-sync if needed
+- **Key hash-based range streaming** for partitioned data distribution
+- **Write interception** during streaming phase to capture live updates
+- **Stream state tracking**: copying, streaming, syncing, completed, failed
+- **Metrics**: keys copied, keys streamed, bytes transferred, duration
+
 ## 4. Core Entities
 
 ### 4.1 Key-Value Entry
@@ -97,18 +143,21 @@ type KeyValueEntry struct {
     Value       []byte
     VectorClock VectorClock  // List of {coordinator_node_id, logical_timestamp}
     Timestamp   int64
+    IsTombstone bool         // True if this is a delete marker
 }
 ```
 
 ### 4.2 Commit Log Entry
 ```go
 type CommitLogEntry struct {
-    TenantID     string
-    Key          string
-    Value        []byte
-    VectorClock  VectorClock
-    Timestamp    int64
-    OperationType string  // "write", "repair", "delete"
+    SequenceNumber uint64        // Monotonically increasing sequence number
+    TenantID       string
+    Key            string
+    Value          []byte
+    VectorClock    VectorClock
+    Timestamp      int64
+    OperationType  string        // "write", "repair", "delete"
+    Checksum       uint32        // CRC32 checksum for data integrity
 }
 ```
 
@@ -119,6 +168,7 @@ type MemTableEntry struct {
     Value       []byte
     VectorClock VectorClock
     Timestamp   int64
+    IsTombstone bool    // True if this is a delete marker
 }
 ```
 
@@ -382,9 +432,39 @@ vectorClock := VectorClock{
    - Throttled to avoid impacting normal operations
    - Prioritizes levels with most overlap or highest read amplification
 
-### 8.5 Migration Operations
+### 8.5 Delete Operation
+1. **Validate**: Check tenant_id and key format
+2. **Create Tombstone**: Create entry with `IsTombstone=true`, `Value=nil`
+3. **Commit Log**: Write to commit log with `OperationType=delete`
+4. **MemTable**: Insert tombstone in memtable
+5. **Cache**: Update cache with tombstone (or invalidate entry)
+6. **Compaction**: Tombstones are removed during compaction (after propagation)
+7. **Response**: Return success with updated vector clock
 
-#### 8.5.1 Node Addition - Receiving Data
+**Tombstone Lifecycle**:
+- Tombstones are treated as special entries with nil value
+- Preserved during compaction until TTL expires or manually cleaned
+- Used to signal deletions during read repair and anti-entropy
+- Eventually garbage collected during major compaction
+
+### 8.6 Disk Space Check Flow
+1. **Pre-write Estimation**: Estimate total bytes needed for write operation
+   - Commit log entry size
+   - MemTable overhead
+   - Eventual SSTable size (amortized)
+   - Safety margin (20% buffer)
+2. **Check Thresholds**: Query disk manager for current state
+3. **Handle States**:
+   - **Normal** (< 80%): Allow write, no action
+   - **Warning** (80-90%): Allow write, log warning
+   - **Throttled** (90-95%): Reject large writes, allow small writes
+   - **Circuit Breaker** (>= 95%): Reject all writes
+4. **Error Response**: Return appropriate error code if rejected
+5. **Automatic Recovery**: When disk space freed, automatically transition back to normal state
+
+### 8.7 Migration Operations
+
+#### 8.7.1 Node Addition - Receiving Data
 
 When a new node is added and data is being migrated to it:
 
@@ -393,7 +473,7 @@ When a new node is added and data is being migrated to it:
 3. **Bulk Data Reception**: For bulk migration, coordinator streams data
 4. **Verify Data**: After migration, node verifies data integrity
 
-#### 8.5.2 Node Deletion - Sending Data
+#### 8.7.2 Node Deletion - Sending Data
 
 When a node is being removed:
 
@@ -404,7 +484,7 @@ When a node is being removed:
 5. **Verify Replication**: Ensure all data has been copied to other nodes
 6. **Mark as Drained**: Return "drained" status to coordinator
 
-#### 8.5.3 Data Streaming for Migration
+#### 8.7.3 Data Streaming for Migration
 
 **Efficient Streaming**:
 - Read from SSTables in sorted order
@@ -470,23 +550,130 @@ func StreamKeys(tenantID string, keyRangeStart string, keyRangeEnd string) {
 
 ## 11. Error Handling
 
-### 11.1 Disk Failures
-- Detect disk failures
-- Mark node as unhealthy
-- Stop accepting writes (reads may continue from cache/memtable)
-- Alert monitoring system
+### 11.1 Structured Error System
 
-### 11.2 Memory Pressure
-- Monitor memory usage
-- Aggressive cache eviction if memory pressure
-- Trigger memtable flush early if needed
-- Reject new writes if memory exhausted
+The storage node uses a **comprehensive structured error system** with error codes, context preservation, and automatic gRPC mapping.
 
-### 11.3 Corrupted Data
-- Detect corrupted commit log entries
-- Skip corrupted entries during recovery
-- Log errors for manual intervention
-- Use checksums for data integrity
+**StorageError Structure**:
+```go
+type StorageError struct {
+    Code    ErrorCode                  // Numeric error code
+    Message string                     // Human-readable message
+    Details map[string]interface{}     // Additional context
+    Cause   error                      // Wrapped underlying error
+}
+```
+
+**Key Features**:
+- **Automatic gRPC mapping**: Internal error codes map to appropriate gRPC status codes
+- **Context preservation**: Errors carry relevant details (tenant_id, key, sizes, usage, etc.)
+- **Error chaining**: Underlying errors are wrapped and preserved
+- **Type-safe helpers**: Convenience constructors for common error types
+
+### 11.2 Error Code Categories
+
+All error codes follow a structured numbering system:
+
+#### Client Errors (1xxx series - equivalent to HTTP 4xx)
+
+| Code | Name | Description | gRPC Code |
+|------|------|-------------|-----------|
+| 1000 | `ErrCodeInvalidArgument` | Invalid input parameters | InvalidArgument |
+| 1001 | `ErrCodeKeyNotFound` | Key does not exist | NotFound |
+| 1002 | `ErrCodeKeyTooLarge` | Key exceeds 1KB limit | InvalidArgument |
+| 1003 | `ErrCodeValueTooLarge` | Value exceeds 10MB limit | InvalidArgument |
+| 1004 | `ErrCodeInvalidTenantID` | Tenant ID format invalid or contains forbidden characters | InvalidArgument |
+| 1005 | `ErrCodeInvalidKey` | Key contains null bytes or control characters | InvalidArgument |
+| 1006 | `ErrCodeChecksumFailed` | Checksum validation failed on read | DataLoss |
+
+#### Server Errors (2xxx series - equivalent to HTTP 5xx)
+
+| Code | Name | Description | gRPC Code |
+|------|------|-------------|-----------|
+| 2000 | `ErrCodeInternal` | Internal server error | Internal |
+| 2001 | `ErrCodeUnavailable` | Service temporarily unavailable | Unavailable |
+| 2002 | `ErrCodeDiskFull` | Disk usage >= 95% (circuit breaker) | ResourceExhausted |
+| 2003 | `ErrCodeDiskThrottled` | Disk usage >= 90% (throttled) | Unavailable |
+| 2004 | `ErrCodeCommitLogFailed` | Commit log write failure | Internal |
+| 2005 | `ErrCodeMemTableFailed` | MemTable operation failure | Internal |
+| 2006 | `ErrCodeSSTableFailed` | SSTable operation failure | Internal |
+| 2007 | `ErrCodeCorruptedData` | Data corruption detected | DataLoss |
+| 2008 | `ErrCodeResourceExhausted` | Generic resource exhaustion | ResourceExhausted |
+
+### 11.3 Data Corruption Handling
+
+**Detection**:
+- **CRC32 checksums** computed for all data in commit log and SSTables
+- **Validation on read**: Checksum verified when reading from disk
+- **Automatic skip**: Corrupted entries are skipped during recovery
+- **Alerting**: Corruption events logged and metrics incremented
+
+**Recovery**:
+1. **Log corruption event** with full context (file, offset, checksum values)
+2. **Skip corrupted entry** and continue processing
+3. **Increment metrics**: `checksum_failures_total` counter
+4. **Alert monitoring system**: Trigger alerts for manual investigation
+5. **Use replication**: Coordinator can fetch correct value from replica nodes
+6. **Manual intervention**: Operators can restore from backups or replicas
+
+**Corruption Sources**:
+- Disk hardware failures
+- Bit rot over time
+- File system bugs
+- Incomplete writes (mitigated by sync operations)
+
+### 11.4 Disk Full Handling
+
+**Proactive Prevention**:
+1. **Check before write**: Estimate write size and check available space
+2. **Three-tier thresholds**:
+   - 80%: Warning logged, no action
+   - 90%: Throttling enabled (reject large writes)
+   - 95%: Circuit breaker (reject all writes)
+3. **Automatic recovery**: When space freed, system automatically recovers
+
+**Mitigation Actions**:
+- **Compact SSTables**: Trigger immediate compaction to reclaim space
+- **Truncate commit logs**: Remove old segments after verification
+- **Alert operators**: Send alerts for manual cleanup
+- **Reject writes**: Return `ErrCodeDiskFull` or `ErrCodeDiskThrottled`
+
+**Client Response**:
+- Clients should implement **exponential backoff** for disk throttle errors
+- Coordinators can **route to other replicas** when disk full detected
+- Monitor `disk_usage_percent` metric to predict issues
+
+### 11.5 Memory Pressure Handling
+
+**Detection**:
+- Monitor heap usage via Go runtime metrics
+- Track cache size and memtable size
+- Detect allocation pressure and GC frequency
+
+**Mitigation**:
+1. **Aggressive cache eviction**: Reduce cache size by evicting lowest-score entries
+2. **Early memtable flush**: Trigger flush before reaching size threshold
+3. **Reject new writes**: Return `ErrCodeResourceExhausted` if memory critical
+4. **Throttle compaction**: Pause compaction workers to reduce memory usage
+
+**Recovery**:
+- Automatic recovery as memory pressure decreases
+- Gradual ramp-up of cache size and compaction activity
+
+### 11.6 Disk Hardware Failures
+
+**Detection**:
+- File system I/O errors
+- Repeated write/read failures
+- Syscall errors from disk operations
+
+**Actions**:
+1. **Mark node unhealthy**: Update health status to "unhealthy"
+2. **Stop accepting writes**: Reject all write operations
+3. **Continue reads from memory**: Cache and memtable still accessible
+4. **Alert monitoring**: Send critical alerts
+5. **Gossip failure**: Broadcast unhealthy status to coordinators
+6. **Graceful degradation**: Allow reads to continue if possible
 
 ## 12. Monitoring and Observability
 
@@ -519,15 +706,60 @@ type HealthStatus struct {
 ```
 
 ### 12.2 Metrics
-- Write/read QPS
-- Latency percentiles (p50, p95, p99)
-- Cache hit rate
-- Memtable size
-- SSTable count
-- Disk usage
-- Memory usage
-- Commit log size
-- Gossip protocol metrics (peer connections, health propagation time)
+
+**Core Performance Metrics**:
+- Write/read QPS (queries per second)
+- Latency percentiles (p50, p95, p99, p999)
+- Cache hit rate and miss rate
+- Memtable size and flush frequency
+- SSTable count per level
+- Compaction duration and frequency
+
+**Resource Utilization Metrics**:
+- **Disk usage percentage** (critical for throttling/circuit breaker)
+- **Disk available bytes**
+- **Disk throttle events** (count of throttled writes)
+- **Disk circuit breaker events** (count of rejected writes due to full disk)
+- Memory usage (heap, cache, memtable)
+- CPU usage
+- Commit log size and rotation frequency
+
+**Data Integrity Metrics**:
+- **Checksum validation failures** (total count)
+- **Checksum validation latency** (time to validate)
+- **Corrupted entries detected** (commit log, SSTables)
+- Data recovery operations
+
+**Validation Metrics**:
+- **Validation rejection rate** by reason (key size, value size, tenant ID format, etc.)
+- **Write size estimation accuracy** (estimated vs actual)
+- Input sanitization operations
+
+**Worker Pool Metrics**:
+- **Worker pool utilization** (active workers / max workers)
+- **Queue utilization** (queued tasks / queue size)
+- **Task success rate** (completed / total)
+- **Task failure rate** (failed / total)
+- **Task rejection rate** (rejected / submitted)
+- Worker pool latency (time from submit to completion)
+
+**Error Metrics**:
+- **Error code distribution** (count by error code)
+- Total errors by category (client vs server)
+- Error rate per operation (write, read, delete)
+
+**Streaming Metrics** (Phase 2):
+- Active streams count
+- Keys copied per stream
+- Keys streamed per stream
+- Bytes transferred (copied + streamed)
+- Stream duration and throughput
+- Checksum verification time
+
+**Gossip Protocol Metrics**:
+- Peer connections (active peers)
+- Health propagation time (time to propagate status change)
+- Gossip message rate
 
 ### 12.3 Logging
 - Write/read operations (with tenant_id, key)

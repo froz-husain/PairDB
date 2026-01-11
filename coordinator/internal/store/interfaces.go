@@ -25,6 +25,18 @@ type MetadataStore interface {
 	RemoveStorageNode(ctx context.Context, nodeID string) error
 	UpdateStorageNodeStatus(ctx context.Context, nodeID string, status string) error
 
+	// Node state and range tracking operations (Cassandra-correct topology)
+	UpdateNodeState(ctx context.Context, nodeID string, state model.NodeState) error
+	UpdateNodeRanges(ctx context.Context, nodeID string, pendingRanges []model.PendingRangeInfo, leavingRanges []model.LeavingRangeInfo) error
+	GetStorageNode(ctx context.Context, nodeID string) (*model.StorageNode, error)
+
+	// Topology change tracking operations
+	AddPendingChange(ctx context.Context, change *model.PendingChange) error
+	GetPendingChange(ctx context.Context, changeID string) (*model.PendingChange, error)
+	UpdatePendingChange(ctx context.Context, change *model.PendingChange) error
+	ListPendingChanges(ctx context.Context, status model.PendingChangeStatus) ([]*model.PendingChange, error)
+	DeletePendingChange(ctx context.Context, changeID string) error
+
 	// Migration operations
 	GetMigration(ctx context.Context, migrationID string) (*model.Migration, error)
 	CreateMigration(ctx context.Context, migration *model.Migration) error

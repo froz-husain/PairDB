@@ -66,11 +66,13 @@ func (s *CacheService) Put(key string, value []byte, vectorClock model.VectorClo
 	// Check if key already exists
 	if existing, found := s.cache[key]; found {
 		// Update existing entry
+		oldSize := int64(len(existing.Key) + len(existing.Value) + 64)
 		existing.Value = value
 		existing.VectorClock = vectorClock
 		existing.AccessCount++
 		existing.LastAccess = time.Now()
 		existing.Score = s.calculateScore(existing)
+		s.currentSize = s.currentSize - oldSize + entrySize
 		return
 	}
 
@@ -91,6 +93,18 @@ func (s *CacheService) Put(key string, value []byte, vectorClock model.VectorClo
 
 	s.cache[key] = entry
 	s.currentSize += entrySize
+}
+
+// Remove removes a key from cache
+func (s *CacheService) Remove(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if entry, found := s.cache[key]; found {
+		entrySize := int64(len(entry.Key) + len(entry.Value) + 64)
+		delete(s.cache, key)
+		s.currentSize -= entrySize
+	}
 }
 
 // calculateScore computes adaptive score for eviction

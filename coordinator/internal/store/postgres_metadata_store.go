@@ -15,6 +15,12 @@ type PostgresMetadataStore struct {
 	logger *zap.Logger
 }
 
+// GetPool returns the underlying pgxpool.Pool
+// This is used by other stores (e.g., HintStore) that share the same database
+func (s *PostgresMetadataStore) GetPool() *pgxpool.Pool {
+	return s.pool
+}
+
 // NewPostgresMetadataStore creates a new PostgreSQL metadata store
 func NewPostgresMetadataStore(
 	host string,
@@ -275,6 +281,235 @@ func (s *PostgresMetadataStore) UpdateMigrationStatus(ctx context.Context, migra
 
 	_, err := s.pool.Exec(ctx, query, migrationID, string(status), errorMessage)
 	return err
+}
+
+// UpdateNodeState updates the state of a storage node
+func (s *PostgresMetadataStore) UpdateNodeState(ctx context.Context, nodeID string, state model.NodeState) error {
+	query := `
+		UPDATE storage_nodes
+		SET state = $2, updated_at = NOW()
+		WHERE node_id = $1
+	`
+
+	result, err := s.pool.Exec(ctx, query, nodeID, string(state))
+	if err != nil {
+		return fmt.Errorf("failed to update node state: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("storage node not found")
+	}
+
+	return nil
+}
+
+// UpdateNodeRanges updates the pending and leaving ranges for a storage node
+func (s *PostgresMetadataStore) UpdateNodeRanges(ctx context.Context, nodeID string, pendingRanges []model.PendingRangeInfo, leavingRanges []model.LeavingRangeInfo) error {
+	query := `
+		UPDATE storage_nodes
+		SET pending_ranges = $2, leaving_ranges = $3, updated_at = NOW()
+		WHERE node_id = $1
+	`
+
+	result, err := s.pool.Exec(ctx, query, nodeID, pendingRanges, leavingRanges)
+	if err != nil {
+		return fmt.Errorf("failed to update node ranges: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("storage node not found")
+	}
+
+	return nil
+}
+
+// GetStorageNode retrieves a single storage node by ID
+func (s *PostgresMetadataStore) GetStorageNode(ctx context.Context, nodeID string) (*model.StorageNode, error) {
+	query := `
+		SELECT node_id, host, port, status, state, virtual_nodes, tokens,
+		       pending_ranges, leaving_ranges, created_at, updated_at
+		FROM storage_nodes
+		WHERE node_id = $1
+	`
+
+	var node model.StorageNode
+	var stateStr string
+	err := s.pool.QueryRow(ctx, query, nodeID).Scan(
+		&node.NodeID,
+		&node.Host,
+		&node.Port,
+		&node.Status,
+		&stateStr,
+		&node.VirtualNodes,
+		&node.Tokens,
+		&node.PendingRanges,
+		&node.LeavingRanges,
+		&node.CreatedAt,
+		&node.UpdatedAt,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get storage node: %w", err)
+	}
+
+	node.State = model.NodeState(stateStr)
+	return &node, nil
+}
+
+// AddPendingChange creates a new pending topology change record
+func (s *PostgresMetadataStore) AddPendingChange(ctx context.Context, change *model.PendingChange) error {
+	query := `
+		INSERT INTO pending_changes (
+			change_id, type, node_id, affected_nodes, ranges,
+			start_time, status, last_updated, progress
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`
+
+	_, err := s.pool.Exec(ctx, query,
+		change.ChangeID,
+		change.Type,
+		change.NodeID,
+		change.AffectedNodes,
+		change.Ranges,
+		change.StartTime,
+		string(change.Status),
+		change.LastUpdated,
+		change.Progress,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to add pending change: %w", err)
+	}
+
+	return nil
+}
+
+// GetPendingChange retrieves a pending change by ID
+func (s *PostgresMetadataStore) GetPendingChange(ctx context.Context, changeID string) (*model.PendingChange, error) {
+	query := `
+		SELECT change_id, type, node_id, affected_nodes, ranges,
+		       start_time, status, error_message, last_updated, progress
+		FROM pending_changes
+		WHERE change_id = $1
+	`
+
+	var change model.PendingChange
+	var statusStr string
+	err := s.pool.QueryRow(ctx, query, changeID).Scan(
+		&change.ChangeID,
+		&change.Type,
+		&change.NodeID,
+		&change.AffectedNodes,
+		&change.Ranges,
+		&change.StartTime,
+		&statusStr,
+		&change.ErrorMessage,
+		&change.LastUpdated,
+		&change.Progress,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending change: %w", err)
+	}
+
+	change.Status = model.PendingChangeStatus(statusStr)
+	return &change, nil
+}
+
+// UpdatePendingChange updates an existing pending change
+func (s *PostgresMetadataStore) UpdatePendingChange(ctx context.Context, change *model.PendingChange) error {
+	query := `
+		UPDATE pending_changes
+		SET status = $2, error_message = $3, last_updated = $4, progress = $5
+		WHERE change_id = $1
+	`
+
+	result, err := s.pool.Exec(ctx, query,
+		change.ChangeID,
+		string(change.Status),
+		change.ErrorMessage,
+		change.LastUpdated,
+		change.Progress,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update pending change: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("pending change not found")
+	}
+
+	return nil
+}
+
+// ListPendingChanges retrieves all pending changes with optional status filter
+func (s *PostgresMetadataStore) ListPendingChanges(ctx context.Context, status model.PendingChangeStatus) ([]*model.PendingChange, error) {
+	var query string
+	var args []interface{}
+
+	if status != "" {
+		query = `
+			SELECT change_id, type, node_id, affected_nodes, ranges,
+			       start_time, status, error_message, last_updated, progress
+			FROM pending_changes
+			WHERE status = $1
+			ORDER BY start_time DESC
+		`
+		args = append(args, string(status))
+	} else {
+		query = `
+			SELECT change_id, type, node_id, affected_nodes, ranges,
+			       start_time, status, error_message, last_updated, progress
+			FROM pending_changes
+			ORDER BY start_time DESC
+		`
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pending changes: %w", err)
+	}
+	defer rows.Close()
+
+	changes := make([]*model.PendingChange, 0)
+	for rows.Next() {
+		var change model.PendingChange
+		var statusStr string
+		if err := rows.Scan(
+			&change.ChangeID,
+			&change.Type,
+			&change.NodeID,
+			&change.AffectedNodes,
+			&change.Ranges,
+			&change.StartTime,
+			&statusStr,
+			&change.ErrorMessage,
+			&change.LastUpdated,
+			&change.Progress,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan pending change: %w", err)
+		}
+		change.Status = model.PendingChangeStatus(statusStr)
+		changes = append(changes, &change)
+	}
+
+	return changes, rows.Err()
+}
+
+// DeletePendingChange deletes a pending change record
+func (s *PostgresMetadataStore) DeletePendingChange(ctx context.Context, changeID string) error {
+	query := `DELETE FROM pending_changes WHERE change_id = $1`
+	result, err := s.pool.Exec(ctx, query, changeID)
+	if err != nil {
+		return fmt.Errorf("failed to delete pending change: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("pending change not found")
+	}
+
+	return nil
 }
 
 // Ping checks the database connection

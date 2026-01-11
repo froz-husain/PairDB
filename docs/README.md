@@ -1,6 +1,6 @@
 # PairDB Documentation
 
-This directory contains the high-level design documentation for pairDB, a distributed key-value store.
+This directory contains the complete design and operational documentation for pairDB, a production-ready distributed key-value store with Cassandra-correct topology management, hinted handoff for write durability, and comprehensive safety mechanisms.
 
 ## Document Structure
 
@@ -14,16 +14,13 @@ Complete functional and non-functional requirements for the system.
 - Technology stack summary
 - Key design decisions
 - **Phase 2 Streaming**: Cassandra-pattern node addition/removal with zero downtime
+  - Immediate ring integration for node addition
+  - Hash-range based data transfer
+  - Background monitoring with automatic rollback
+  - Edge case handling (read staleness, quorum consistency, race conditions, hash ring update timing)
+  - Complete flow specifications for node addition and removal
+  - Node lifecycle management (`active`, `bootstrapping`, `draining`, `failed`)
 - Simplified scalability considerations and edge case solutions
-
-### 2.1. [Phase 2 Streaming Architecture](PHASE2_STREAMING_ARCHITECTURE.md) **NEW**
-Comprehensive design for zero-downtime node topology changes:
-- Cassandra-pattern immediate ring integration
-- Hash-range based data transfer
-- Background monitoring with automatic rollback
-- Edge case handling (read staleness, quorum consistency, race conditions)
-- Complete API specifications for streaming operations
-- Node lifecycle management (`active`, `bootstrapping`, `draining`, `failed`)
 
 ### 3. [Use Case Diagram](use-case-diagram.md)
 Global use case diagram for pairDB showing:
@@ -78,13 +75,16 @@ Sequence diagrams for all flows:
 
 ### 6. [Coordinator Design](coordinator/design.md)
 High-level design for the Coordinator service:
-- Requirements
-- Service architecture
+- Requirements and service architecture
 - APIs offered (internal and external)
-- Data stores used
-- Key algorithms
-- Performance optimizations
-- Deployment considerations
+- Data stores used (PostgreSQL metadata, Redis idempotency, PostgreSQL hints)
+- Key algorithms (consistent hashing, vector clocks, quorum)
+- **Hinted Handoff System** (Phase 6): Write durability during node failures
+- **Cleanup Safety System** (Phase 7): Grace periods and quorum verification
+- **Concurrent Node Operations** (Phase 8): Per-node locking for scalability
+- **Replica Selection**: Split GetWriteReplicas/GetReadReplicas with authoritative replica concept
+- Storage node lifecycle management
+- Performance optimizations and deployment considerations
 
 ### 6.1. [Coordinator Low-Level Design](coordinator/low-level-design.md)
 Detailed implementation specifications for Coordinator service.
@@ -135,6 +135,13 @@ Sequence diagrams for all flows:
 - Commit Log Recovery flow
 - Cache Eviction flow
 - Gossip Health Monitoring flow
+
+### 7.4. [Storage Node Operational Procedures](storage-node/operational-procedures.md)
+Operational procedures for managing storage nodes in production:
+- Node bootstrap and decommission procedures
+- Monitoring and health checks
+- Troubleshooting common issues
+- Maintenance tasks and best practices
 
 ## Design Philosophy
 

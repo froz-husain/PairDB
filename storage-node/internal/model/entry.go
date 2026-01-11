@@ -20,16 +20,19 @@ type KeyValueEntry struct {
 	Value       []byte
 	VectorClock VectorClock
 	Timestamp   int64
+	IsTombstone bool // True if this is a delete marker
 }
 
 // CommitLogEntry represents an entry in the commit log
 type CommitLogEntry struct {
-	TenantID      string
-	Key           string
-	Value         []byte
-	VectorClock   VectorClock
-	Timestamp     int64
-	OperationType OperationType
+	SequenceNumber uint64        // Monotonically increasing sequence number for ordering
+	TenantID       string
+	Key            string
+	Value          []byte
+	VectorClock    VectorClock
+	Timestamp      int64
+	OperationType  OperationType
+	Checksum       uint32 // CRC32 checksum for data integrity
 }
 
 // OperationType defines the type of operation
@@ -47,6 +50,7 @@ type MemTableEntry struct {
 	Value       []byte
 	VectorClock VectorClock
 	Timestamp   int64
+	IsTombstone bool // True if this is a delete marker
 }
 
 // CacheEntry represents an entry in the cache

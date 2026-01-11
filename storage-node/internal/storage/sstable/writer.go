@@ -7,13 +7,15 @@ import (
 	"os"
 
 	"github.com/devrev/pairdb/storage-node/internal/model"
+	"github.com/devrev/pairdb/storage-node/internal/util"
 )
 
 // IndexEntry represents an entry in the SSTable index
 type IndexEntry struct {
-	Key    string
-	Offset int64
-	Size   int32
+	Key      string
+	Offset   int64
+	Size     int32
+	Checksum uint32 // CRC32 checksum of the data block
 }
 
 // SSTableWriter writes data to an SSTable file
@@ -64,7 +66,7 @@ func NewSSTableWriter(filePath string, config *SSTableConfig) (*SSTableWriter, e
 	}, nil
 }
 
-// Write writes a memtable entry to the SSTable
+// Write writes a memtable entry to the SSTable with checksum
 func (w *SSTableWriter) Write(entry *model.MemTableEntry) error {
 	// Serialize entry to JSON
 	data, err := json.Marshal(entry)
@@ -72,10 +74,18 @@ func (w *SSTableWriter) Write(entry *model.MemTableEntry) error {
 		return fmt.Errorf("failed to marshal entry: %w", err)
 	}
 
+	// Compute checksum of the data
+	checksum := util.ComputeChecksum(data)
+
 	// Write entry size
 	entrySize := int32(len(data))
 	if err := binary.Write(w.dataFile, binary.LittleEndian, entrySize); err != nil {
 		return fmt.Errorf("failed to write entry size: %w", err)
+	}
+
+	// Write checksum
+	if err := binary.Write(w.dataFile, binary.LittleEndian, checksum); err != nil {
+		return fmt.Errorf("failed to write checksum: %w", err)
 	}
 
 	// Write entry data
@@ -86,16 +96,17 @@ func (w *SSTableWriter) Write(entry *model.MemTableEntry) error {
 
 	// Add to index
 	w.index = append(w.index, IndexEntry{
-		Key:    entry.Key,
-		Offset: w.offset,
-		Size:   entrySize,
+		Key:      entry.Key,
+		Offset:   w.offset,
+		Size:     entrySize,
+		Checksum: checksum,
 	})
 
 	// Add to bloom filter
 	w.bloomFilter.Add(entry.Key)
 
-	// Update offset (size field + data)
-	w.offset += int64(4 + n)
+	// Update offset (size field + checksum + data)
+	w.offset += int64(4 + 4 + n)
 
 	return nil
 }
@@ -128,7 +139,7 @@ func (w *SSTableWriter) Finalize() error {
 	return nil
 }
 
-// writeIndexEntry writes a single index entry
+// writeIndexEntry writes a single index entry with checksum
 func (w *SSTableWriter) writeIndexEntry(entry IndexEntry) error {
 	// Write key length
 	keyLen := int32(len(entry.Key))
@@ -148,6 +159,11 @@ func (w *SSTableWriter) writeIndexEntry(entry IndexEntry) error {
 
 	// Write size
 	if err := binary.Write(w.indexFile, binary.LittleEndian, entry.Size); err != nil {
+		return err
+	}
+
+	// Write checksum
+	if err := binary.Write(w.indexFile, binary.LittleEndian, entry.Checksum); err != nil {
 		return err
 	}
 

@@ -38,6 +38,10 @@ classDiagram
         -logger: *zap.Logger
         -mu: sync.RWMutex
         +GetReplicas(tenantID, key, replicationFactor) []*StorageNode
+        +GetWriteReplicas(ctx, tenantID, key, rf) []*StorageNode
+        +GetReadReplicas(ctx, tenantID, key, rf) []*StorageNode
+        +GetAuthoritativeReplicas(nodes) []*StorageNode
+        +CountAuthoritativeReplicas(nodes) int
         +refreshHashRing()
         +updateHashRing(ctx) error
     }
@@ -45,6 +49,7 @@ classDiagram
     class ConsistencyService {
         -defaultLevel: string
         +GetRequiredReplicas(consistency, totalReplicas) int
+        +GetRequiredReplicasForWriteSet(consistency, writeReplicas) int
         +ValidateConsistencyLevel(level) bool
     }
     
@@ -75,6 +80,68 @@ classDiagram
         +TriggerRepair(ctx, tenantID, key, latest, replicas)
         +repairWorker()
         +executeRepair(ctx, req) error
+    }
+
+    class HintStore {
+        <<interface>>
+        +StoreHint(ctx, hint) error
+        +GetHintsForNode(ctx, targetNodeID, limit) []*Hint, error
+        +DeleteHint(ctx, hintID) error
+        +CleanupOldHints(ctx, ttl) int64, error
+        +GetHintCount(ctx, targetNodeID) int64, error
+    }
+
+    class PostgreSQLHintStore {
+        -pool: *pgxpool.Pool
+        -logger: *zap.Logger
+        +StoreHint(ctx, hint) error
+        +GetHintsForNode(ctx, targetNodeID, limit) []*Hint, error
+        +DeleteHint(ctx, hintID) error
+        +CleanupOldHints(ctx, ttl) int64, error
+        +GetHintCount(ctx, targetNodeID) int64, error
+    }
+
+    class HintReplayService {
+        -hintStore: HintStore
+        -storageNodeClient: *StorageNodeClient
+        -logger: *zap.Logger
+        -batchSize: int
+        -replayInterval: time.Duration
+        -maxRetries: int
+        +ReplayHintsForNode(ctx, node) error
+        +ScheduleReplay(ctx, node, delay)
+        +CleanupOldHints(ctx, ttl)
+        -replayHint(ctx, node, hint) error
+    }
+
+    class CleanupService {
+        -metadataStore: MetadataStore
+        -storageNodeClient: *StorageNodeClient
+        -routingService: *RoutingService
+        -gracePeriod: time.Duration
+        -logger: *zap.Logger
+        +ScheduleCleanup(ctx, changeID) error
+        +VerifyCleanupSafe(ctx, change) bool, error
+        +ExecuteCleanup(ctx, change) error
+        +ForceCleanup(ctx, changeID, reason) error
+        -verifyQuorum(ctx, change) bool
+        -getReplicasForRange(ctx, tokenRange, rf) []*StorageNode
+        -verifyReplicaHasRange(ctx, replica, tokenRange) bool
+    }
+
+    class NodeHandlerV2 {
+        -metadataStore: MetadataStore
+        -routingService: *RoutingService
+        -keyRangeService: *KeyRangeService
+        -storageNodeClient: *StorageNodeClient
+        -hintReplayService: *HintReplayService
+        -logger: *zap.Logger
+        -nodeLocks: sync.Map
+        +AddStorageNodeV2(ctx, req) *AddStorageNodeResponse
+        +RemoveStorageNodeV2(ctx, req) *RemoveStorageNodeResponse
+        -acquireNodeLock(nodeID) *sync.Mutex
+        -monitorBootstrap(ctx, node, changeID)
+        -monitorDecommission(ctx, node, changeID)
     }
     
     class StorageClient {
@@ -143,7 +210,83 @@ classDiagram
         +Host: string
         +Port: int
         +Status: NodeStatus
+        +State: NodeState
         +VirtualNodes: int
+        +PendingRanges: []PendingRangeInfo
+        +LeavingRanges: []LeavingRangeInfo
+        +CreatedAt: time.Time
+        +UpdatedAt: time.Time
+    }
+
+    class NodeState {
+        <<enumeration>>
+        NORMAL
+        BOOTSTRAPPING
+        LEAVING
+        DOWN
+    }
+
+    class Hint {
+        +HintID: string
+        +TargetNodeID: string
+        +TenantID: string
+        +Key: string
+        +Value: []byte
+        +VectorClock: string
+        +Timestamp: time.Time
+        +CreatedAt: time.Time
+        +ReplayCount: int
+    }
+
+    class PendingChange {
+        +ChangeID: string
+        +Type: string
+        +NodeID: string
+        +AffectedNodes: []string
+        +Ranges: []TokenRange
+        +StartTime: time.Time
+        +Status: PendingChangeStatus
+        +ErrorMessage: string
+        +LastUpdated: time.Time
+        +CompletedAt: time.Time
+        +Progress: map[string]StreamingProgress
+    }
+
+    class PendingChangeStatus {
+        <<enumeration>>
+        IN_PROGRESS
+        COMPLETED
+        FAILED
+        ROLLED_BACK
+    }
+
+    class TokenRange {
+        +Start: uint64
+        +End: uint64
+    }
+
+    class PendingRangeInfo {
+        +Range: TokenRange
+        +OldOwnerID: string
+        +NewOwnerID: string
+        +StreamingState: string
+    }
+
+    class LeavingRangeInfo {
+        +Range: TokenRange
+        +OldOwnerID: string
+        +NewOwnerID: string
+        +StreamingState: string
+    }
+
+    class StreamingProgress {
+        +SourceNodeID: string
+        +TargetNodeID: string
+        +KeysCopied: int64
+        +KeysStreamed: int64
+        +BytesTransferred: int64
+        +State: string
+        +LastUpdate: time.Time
     }
     
     class VectorClock {
@@ -187,21 +330,47 @@ classDiagram
     CoordinatorService --> IdempotencyService : uses
     CoordinatorService --> ConflictService : uses
     CoordinatorService --> StorageClient : uses
-    
+    CoordinatorService --> HintStore : uses
+
     TenantService --> MetadataStore : uses
     TenantService --> Cache : uses
-    
+
     RoutingService --> HashRing : uses
     RoutingService --> MetadataStore : uses
     RoutingService --> ConsistentHasher : uses
-    
+
     ConflictService --> VectorClockService : uses
     ConflictService --> StorageClient : uses
-    
+
     IdempotencyService --> IdempotencyStore : uses
-    
+
+    PostgreSQLHintStore ..|> HintStore : implements
+
+    HintReplayService --> HintStore : uses
+    HintReplayService --> StorageClient : uses
+
+    CleanupService --> MetadataStore : uses
+    CleanupService --> RoutingService : uses
+    CleanupService --> StorageClient : uses
+
+    NodeHandlerV2 --> MetadataStore : uses
+    NodeHandlerV2 --> RoutingService : uses
+    NodeHandlerV2 --> HintReplayService : uses
+    NodeHandlerV2 --> StorageClient : uses
+
     HashRing --> StorageNode : contains
     ConsistentHasher --> HashRing : manages
+
+    HintStore --> Hint : manages
+    MetadataStore --> PendingChange : stores
+    StorageNode --> NodeState : has
+    StorageNode --> PendingRangeInfo : contains
+    StorageNode --> LeavingRangeInfo : contains
+    PendingChange --> PendingChangeStatus : has
+    PendingChange --> TokenRange : contains
+    PendingChange --> StreamingProgress : tracks
+    PendingRangeInfo --> TokenRange : uses
+    LeavingRangeInfo --> TokenRange : uses
 ```
 
 ## Class Descriptions
@@ -270,4 +439,77 @@ classDiagram
 - Represents the consistent hash ring topology
 - Contains mapping of nodes and virtual nodes
 - Updated periodically from metadata store
+
+### HintStore (Interface)
+- Manages storage and retrieval of hints for failed writes
+- Stores hints for missed writes to temporarily unavailable nodes
+- Supports TTL-based cleanup and batch retrieval
+
+### PostgreSQLHintStore
+- PostgreSQL implementation of HintStore interface
+- Persists hints to database for durability
+- Indexed for efficient queries by target node
+
+### HintReplayService
+- Manages replay of missed writes to recovered nodes
+- Replays hints in batches (100 hints per batch)
+- Rate-limited replay (1 second between batches)
+- Automatic cleanup of old hints (7-day TTL)
+- Maximum 3 retry attempts per hint
+
+### CleanupService
+- Manages safe data cleanup after topology changes
+- Enforces 24-hour grace period before cleanup
+- Verifies quorum of replicas have data before deletion
+- Provides force cleanup for emergencies
+
+### NodeHandlerV2
+- Handles storage node addition and removal (Phase 2 streaming)
+- Implements per-node locking for concurrent operations
+- Integrates hint replay during bootstrap
+- Monitors bootstrap and decommission progress
+- Cassandra-correct topology management
+
+### NodeState (Enumeration)
+- NORMAL: Fully operational node, authoritative for data
+- BOOTSTRAPPING: Node receiving historical data, non-authoritative
+- LEAVING: Node transferring data before removal, non-authoritative
+- DOWN: Node is unreachable or failed
+
+### Hint (Model)
+- Represents a missed write that needs to be replayed
+- Contains write details (tenant, key, value, vector clock)
+- Tracks replay attempts (max 3 retries)
+- Created automatically on write failures
+
+### PendingChange (Model)
+- Tracks ongoing topology changes (bootstrap/decommission)
+- Stores progress information for recovery
+- Includes CompletedAt timestamp for grace period tracking
+- Maps streaming progress per source node
+
+### PendingChangeStatus (Enumeration)
+- IN_PROGRESS: Topology change is ongoing
+- COMPLETED: Change completed successfully
+- FAILED: Change failed with errors
+- ROLLED_BACK: Change was reverted
+
+### TokenRange (Model)
+- Represents a hash range [Start, End) in the consistent hash ring
+- Used to track data ownership during topology changes
+
+### PendingRangeInfo (Model)
+- Tracks ranges being received during bootstrap
+- Bidirectional tracking: knows old and new owner
+- Streaming state: pending, streaming, completed
+
+### LeavingRangeInfo (Model)
+- Tracks ranges being transferred during decommission
+- Stored on departing node
+- Knows which node will inherit each range
+
+### StreamingProgress (Model)
+- Tracks per-stream progress during topology changes
+- Records keys copied, bytes transferred, state
+- Updated periodically during streaming operations
 

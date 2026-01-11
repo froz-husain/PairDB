@@ -7,22 +7,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/devrev/pairdb/storage-node/internal/model"
+	"github.com/devrev/pairdb/storage-node/internal/util"
 	"go.uber.org/zap"
 )
 
 // CommitLogService manages write-ahead logging for durability
 type CommitLogService struct {
-	config      *CommitLogConfig
-	currentFile *os.File
-	logger      *zap.Logger
-	mu          sync.Mutex
-	dataDir     string
-	segmentID   int64
-	stopChan    chan struct{}
+	config         *CommitLogConfig
+	currentFile    *os.File
+	logger         *zap.Logger
+	mu             sync.Mutex
+	dataDir        string
+	segmentID      int64
+	stopChan       chan struct{}
+	sequenceNumber uint64 // Atomic counter for sequence numbers
 }
 
 // CommitLogConfig holds commit log configuration
@@ -58,15 +62,28 @@ func NewCommitLogService(cfg *CommitLogConfig, dataDir string, logger *zap.Logge
 	return cls, nil
 }
 
-// Append appends an entry to the commit log
+// Append appends an entry to the commit log with checksum and sequence number
 func (s *CommitLogService) Append(ctx context.Context, entry *model.CommitLogEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Serialize entry
+	// Assign sequence number (monotonically increasing)
+	entry.SequenceNumber = atomic.AddUint64(&s.sequenceNumber, 1)
+
+	// Serialize entry (without checksum first)
+	entry.Checksum = 0
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("failed to marshal entry: %w", err)
+	}
+
+	// Compute checksum of serialized data
+	entry.Checksum = util.ComputeChecksum(data)
+
+	// Re-serialize with checksum
+	data, err = json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("failed to marshal entry with checksum: %w", err)
 	}
 
 	// Append newline for easier parsing
@@ -151,7 +168,7 @@ func (s *CommitLogService) checkRotation() {
 	}
 }
 
-// Recover replays commit log entries on startup
+// Recover replays commit log entries on startup with checksum validation
 func (s *CommitLogService) Recover(ctx context.Context, memTableSvc *MemTableService) error {
 	s.logger.Info("Starting commit log recovery")
 
@@ -161,9 +178,15 @@ func (s *CommitLogService) Recover(ctx context.Context, memTableSvc *MemTableSer
 		return fmt.Errorf("failed to list commit log files: %w", err)
 	}
 
+	// Sort files by timestamp (embedded in filename) to ensure ordered replay
+	sort.Strings(files)
+
 	recovered := 0
+	skipped := 0
+	maxSeqNum := uint64(0)
+
 	for _, filePath := range files {
-		count, err := s.recoverFromFile(ctx, filePath, memTableSvc)
+		count, skipCount, maxSeq, err := s.recoverFromFile(ctx, filePath, memTableSvc)
 		if err != nil {
 			s.logger.Error("Failed to recover from file",
 				zap.String("file", filePath),
@@ -171,32 +194,89 @@ func (s *CommitLogService) Recover(ctx context.Context, memTableSvc *MemTableSer
 			continue
 		}
 		recovered += count
+		skipped += skipCount
+		if maxSeq > maxSeqNum {
+			maxSeqNum = maxSeq
+		}
 	}
 
-	s.logger.Info("Commit log recovery completed", zap.Int("entries", recovered))
+	// Update sequence number to continue from where we left off
+	atomic.StoreUint64(&s.sequenceNumber, maxSeqNum)
+
+	s.logger.Info("Commit log recovery completed",
+		zap.Int("recovered", recovered),
+		zap.Int("skipped_corrupted", skipped),
+		zap.Uint64("max_sequence", maxSeqNum))
 	return nil
 }
 
-// recoverFromFile recovers entries from a single commit log file
+// recoverFromFile recovers entries from a single commit log file with checksum validation
+// Returns: (recovered_count, skipped_count, max_sequence_number, error)
 func (s *CommitLogService) recoverFromFile(
 	ctx context.Context,
 	filePath string,
 	memTableSvc *MemTableService,
-) (int, error) {
+) (int, int, uint64, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return 0, err
+		return 0, 0, 0, err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Increase buffer size to handle large entries
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
 	count := 0
+	skipped := 0
+	maxSeqNum := uint64(0)
 
 	for scanner.Scan() {
-		var entry model.CommitLogEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			s.logger.Warn("Failed to unmarshal commit log entry", zap.Error(err))
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
+		}
+
+		var entry model.CommitLogEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			s.logger.Warn("Failed to unmarshal commit log entry, skipping",
+				zap.String("file", filePath),
+				zap.Error(err))
+			skipped++
+			continue
+		}
+
+		// Validate checksum if present
+		if entry.Checksum != 0 {
+			// Re-serialize without checksum to validate
+			originalChecksum := entry.Checksum
+			entry.Checksum = 0
+			data, err := json.Marshal(entry)
+			if err != nil {
+				s.logger.Warn("Failed to marshal entry for checksum validation",
+					zap.String("file", filePath),
+					zap.Error(err))
+				skipped++
+				continue
+			}
+
+			if !util.ValidateChecksum(data, originalChecksum) {
+				s.logger.Warn("Checksum validation failed, skipping corrupted entry",
+					zap.String("file", filePath),
+					zap.Uint64("sequence", entry.SequenceNumber),
+					zap.Uint32("expected", originalChecksum),
+					zap.Uint32("actual", util.ComputeChecksum(data)))
+				skipped++
+				continue
+			}
+
+			// Restore checksum for processing
+			entry.Checksum = originalChecksum
+		}
+
+		// Track max sequence number
+		if entry.SequenceNumber > maxSeqNum {
+			maxSeqNum = entry.SequenceNumber
 		}
 
 		// Replay entry to memtable
@@ -206,10 +286,15 @@ func (s *CommitLogService) recoverFromFile(
 			Value:       entry.Value,
 			VectorClock: entry.VectorClock,
 			Timestamp:   entry.Timestamp,
+			IsTombstone: entry.OperationType == model.OperationTypeDelete,
 		}
 
 		if err := memTableSvc.Put(ctx, memEntry); err != nil {
-			s.logger.Warn("Failed to replay entry to memtable", zap.Error(err))
+			s.logger.Warn("Failed to replay entry to memtable",
+				zap.String("file", filePath),
+				zap.Uint64("sequence", entry.SequenceNumber),
+				zap.Error(err))
+			skipped++
 			continue
 		}
 
@@ -217,10 +302,15 @@ func (s *CommitLogService) recoverFromFile(
 	}
 
 	if err := scanner.Err(); err != nil {
-		return count, err
+		return count, skipped, maxSeqNum, err
 	}
 
-	return count, nil
+	s.logger.Info("Recovered from commit log file",
+		zap.String("file", filePath),
+		zap.Int("recovered", count),
+		zap.Int("skipped", skipped))
+
+	return count, skipped, maxSeqNum, nil
 }
 
 // Close closes the commit log service
