@@ -1,18 +1,29 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git make protobuf-dev
+
+# Disable Go workspace mode to avoid module resolution issues
+ENV GOWORK=off
 
 # Set working directory
 WORKDIR /build
 
 # Copy go mod files
-COPY go.mod go.sum ./
+COPY coordinator/go.mod coordinator/go.sum ./
+
+# Copy storage-node dependency
+COPY storage-node /storage-node
+
+# Remove any go.work files that might have been copied
+RUN rm -f go.work go.work.sum
+
+# Download dependencies
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy coordinator source code
+COPY coordinator .
 
 # Build binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \

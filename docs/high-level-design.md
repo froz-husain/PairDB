@@ -298,6 +298,19 @@ Client → API Gateway → Coordinator
 8. Coordinator triggers repair if conflicts detected
 9. Response returned to client
 
+### 4.3 Delete Flow (High-Level)
+1. Client sends delete request to API Gateway with key and consistency level
+2. Gateway authenticates and routes to Coordinator
+3. Coordinator fetches tenant config from Metadata Store
+4. Coordinator determines replica nodes using consistent hashing
+5. Coordinator reads current value and vector clock from quorum of replicas
+6. Coordinator increments vector clock for the delete operation
+7. Coordinator writes tombstone marker to multiple storage node replicas in parallel
+8. Storage nodes write tombstone to commit log, memtable, and remove from cache
+9. Coordinator waits for acknowledgments based on consistency level (one, quorum, or all)
+10. Response returned to client
+11. Tombstones are eventually cleaned up during compaction
+
 ## 5. Key Design Decisions
 
 1. **Consistent Hashing**: Enables efficient data distribution and minimal rebalancing
@@ -312,6 +325,8 @@ Client → API Gateway → Coordinator
 10. **Idempotency Keys**: Client-provided or server-generated keys ensure exactly-once semantics
 11. **Redis for Idempotency**: Fast, distributed cache with TTL support for idempotency keys
 12. **PostgreSQL for Metadata**: Reliable, ACID-compliant storage for tenant configurations
+13. **Tombstone-Based Deletion**: Soft deletes using tombstone markers ensure consistency across replicas
+14. **Lazy Deletion**: Tombstones cleaned up during compaction to minimize impact on write performance
 
 ## 6. Technology Stack Summary
 

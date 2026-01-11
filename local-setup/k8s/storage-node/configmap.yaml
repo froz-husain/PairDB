@@ -9,8 +9,17 @@ metadata:
 data:
   config.yaml: |
     server:
-      grpc_port: 8080
-      metrics_port: 9091
+      node_id: storage-node-default
+      host: 0.0.0.0
+      port: 8080
+
+    coordinator:
+      enabled: true
+      host: coordinator-service.pairdb.svc.cluster.local
+      port: 50051
+      virtual_nodes: 150
+      retry_interval: 5s
+      max_retries: 10
 
     storage:
       data_dir: /data

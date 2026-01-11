@@ -8,20 +8,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents the complete configuration for the storage node
-type Config struct {
-	Server     ServerConfig     `yaml:"server"`
-	Storage    StorageConfig    `yaml:"storage"`
-	CommitLog  CommitLogConfig  `yaml:"commit_log"`
-	MemTable   MemTableConfig   `yaml:"mem_table"`
-	SSTable    SSTableConfig    `yaml:"sstable"`
-	Cache      CacheConfig      `yaml:"cache"`
-	Compaction CompactionConfig `yaml:"compaction"`
-	Gossip     GossipConfig     `yaml:"gossip"`
-	Metrics    MetricsConfig    `yaml:"metrics"`
-	Logging    LoggingConfig    `yaml:"logging"`
-}
-
 // ServerConfig holds server configuration
 type ServerConfig struct {
 	NodeID             string        `yaml:"node_id"`
@@ -31,6 +17,31 @@ type ServerConfig struct {
 	ReadTimeout        time.Duration `yaml:"read_timeout"`
 	WriteTimeout       time.Duration `yaml:"write_timeout"`
 	ShutdownTimeout    time.Duration `yaml:"shutdown_timeout"`
+}
+
+// CoordinatorConfig holds coordinator client configuration
+type CoordinatorConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	Host          string        `yaml:"host"`
+	Port          int           `yaml:"port"`
+	VirtualNodes  int           `yaml:"virtual_nodes"`
+	RetryInterval time.Duration `yaml:"retry_interval"`
+	MaxRetries    int           `yaml:"max_retries"`
+}
+
+// Config represents the complete configuration for the storage node
+type Config struct {
+	Server      ServerConfig      `yaml:"server"`
+	Coordinator CoordinatorConfig `yaml:"coordinator"`
+	Storage     StorageConfig     `yaml:"storage"`
+	CommitLog   CommitLogConfig   `yaml:"commit_log"`
+	MemTable    MemTableConfig    `yaml:"mem_table"`
+	SSTable     SSTableConfig     `yaml:"sstable"`
+	Cache       CacheConfig       `yaml:"cache"`
+	Compaction  CompactionConfig  `yaml:"compaction"`
+	Gossip      GossipConfig      `yaml:"gossip"`
+	Metrics     MetricsConfig     `yaml:"metrics"`
+	Logging     LoggingConfig     `yaml:"logging"`
 }
 
 // StorageConfig holds storage configuration
@@ -174,6 +185,20 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Cache.RecencyWeight == 0 {
 		cfg.Cache.RecencyWeight = 0.5
+	}
+
+	// Coordinator defaults
+	if cfg.Coordinator.Port == 0 {
+		cfg.Coordinator.Port = 50051
+	}
+	if cfg.Coordinator.VirtualNodes == 0 {
+		cfg.Coordinator.VirtualNodes = 150
+	}
+	if cfg.Coordinator.RetryInterval == 0 {
+		cfg.Coordinator.RetryInterval = 5 * time.Second
+	}
+	if cfg.Coordinator.MaxRetries == 0 {
+		cfg.Coordinator.MaxRetries = 10
 	}
 }
 

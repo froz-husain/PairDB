@@ -1,0 +1,44 @@
+# Ignore build artifacts
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Ignore test and coverage files
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Ignore IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Ignore temporary files
+*.log
+*.tmp
+.DS_Store
+
+# Ignore Go workspace files that might cause issues
+go.work
+go.work.sum
+
+# Ignore git
+.git/
+.gitignore
+
+# Ignore documentation
+*.md
+!README.md
+
+# Ignore local development files
+.env
+.env.local
+*.local
+
+# Ignore vendor (if using modules)
+vendor/

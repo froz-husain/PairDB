@@ -7,7 +7,7 @@ The API Gateway is the entry point for all client requests to pairDB. It is a st
 ## 2. Requirements Summary
 
 ### 2.1 Functional Requirements
-- Expose REST APIs for key-value operations (POST, GET)
+- Expose REST APIs for key-value operations (POST, GET, DELETE)
 - Expose REST APIs for tenant management (POST, PUT, GET)
 - Convert HTTP/REST requests to gRPC requests for Coordinator service
 - Handle HTTP response formatting from gRPC responses
@@ -79,6 +79,21 @@ The API Gateway exposes the following REST endpoints:
 - **Request**: Query parameters `key` (required), `consistency` (optional)
 - **Response**: JSON with `status`, `key`, `value`, `vector_clock`
 - **gRPC Call**: `ReadKeyValue(ReadKeyValueRequest) returns (ReadKeyValueResponse)`
+
+#### 4.1.3 Delete Key-Value
+- **Endpoint**: `DELETE /v1/key-value?key={key}&consistency={consistency}`
+- **Request**: Query parameters `key` (required), `consistency` (optional), Header `X-Vector-Clock` (optional, for conditional deletes)
+- **Response**: JSON with `status`, `key`, `vector_clock` (of the tombstone), `replica_count`
+- **gRPC Call**: `DeleteKeyValue(DeleteKeyValueRequest) returns (DeleteKeyValueResponse)`
+- **Behavior**:
+  - Creates a tombstone marker across replicas (soft delete)
+  - Respects consistency level (one, quorum, all)
+  - Returns success after required replicas acknowledge the delete
+  - Tombstones are cleaned up during compaction
+- **Error Codes**:
+  - `404 Not Found`: Key does not exist (optional, may return 200 for idempotent behavior)
+  - `400 Bad Request`: Invalid key format or consistency level
+  - `503 Service Unavailable`: Cannot reach quorum of replicas
 
 ### 4.2 Tenant Management Operations
 

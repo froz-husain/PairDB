@@ -2,7 +2,9 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"syscall"
@@ -338,4 +340,60 @@ func (h *HealthChecker) SetReadiness(ready bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.readinessOK = ready
+}
+
+// HTTP Handler functions for Kubernetes probes
+
+
+// LivenessHandler handles HTTP liveness probe requests
+func (h *HealthChecker) LivenessHandler(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	live := h.livenessOK
+	status := h.GetStatus()
+	h.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	
+	if !live {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"healthy": live,
+		"status":  status.Status,
+	})
+}
+
+// ReadinessHandler handles HTTP readiness probe requests
+func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	ready := h.readinessOK
+	status := h.GetStatus()
+	h.mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ready":  ready,
+		"status": status.Status,
+	})
+}
+
+// StartHealthServer starts the HTTP health check server
+func (h *HealthChecker) StartHealthServer(port string) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health/live", h.LivenessHandler)
+	mux.HandleFunc("/health/ready", h.ReadinessHandler)
+
+	h.logger.Info("Starting health check HTTP server", zap.String("port", port))
+	
+	return http.ListenAndServe(port, mux)
 }

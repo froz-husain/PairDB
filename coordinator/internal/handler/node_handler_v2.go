@@ -113,8 +113,8 @@ func (h *NodeHandlerV2) AddStorageNodeV2(
 		NodeID:       req.NodeId,
 		Host:         req.Host,
 		Port:         int(req.Port),
-		Status:       model.NodeStatusBootstrapping, // Kept for backward compatibility
-		State:        model.NodeStateBootstrapping,  // NEW: Use State for Cassandra-correct lifecycle
+		Status:       model.NodeStatusActive,        // Set to 'active' to satisfy DB constraint
+		State:        model.NodeStateBootstrapping,  // Use State for Cassandra-correct lifecycle
 		VirtualNodes: virtualNodes,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),

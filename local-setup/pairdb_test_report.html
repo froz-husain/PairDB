@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PairDB Test Report</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+            color: #2c3e50;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .header .timestamp { opacity: 0.9; font-size: 0.9em; }
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .summary-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .summary-card .number {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .summary-card .label { color: #7f8c8d; font-size: 0.9em; text-transform: uppercase; }
+        .passed { color: #27ae60; }
+        .failed { color: #e74c3c; }
+        .skipped { color: #95a5a6; }
+        .warning { color: #f39c12; }
+        .suite {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .suite-header {
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #ecf0f1;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .suite-stats { font-size: 0.8em; color: #7f8c8d; }
+        .test-result {
+            padding: 12px;
+            margin: 8px 0;
+            border-left: 4px solid #bdc3c7;
+            background: #f8f9fa;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .test-result.passed { border-left-color: #27ae60; }
+        .test-result.failed { border-left-color: #e74c3c; }
+        .test-result.skipped { border-left-color: #95a5a6; }
+        .test-result.warning { border-left-color: #f39c12; }
+        .test-name { font-weight: 500; flex: 1; }
+        .test-duration { color: #7f8c8d; font-size: 0.9em; margin: 0 15px; }
+        .test-status {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .test-status.passed { background: #d4edda; color: #155724; }
+        .test-status.failed { background: #f8d7da; color: #721c24; }
+        .test-status.skipped { background: #e2e3e5; color: #383d41; }
+        .test-status.warning { background: #fff3cd; color: #856404; }
+        .test-message {
+            margin-top: 8px;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+            font-size: 0.9em;
+            color: #555;
+        }
+        .test-details {
+            margin-top: 8px;
+            padding: 10px;
+            background: #f1f3f5;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 40px;
+            padding: 20px;
+            color: #7f8c8d;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🗄️ PairDB Test Report</h1>
+            <div class="timestamp">Generated: 2026-01-12 05:14:41</div>
+            <div class="timestamp">Namespace: pairdb</div>
+        </div>
+
+        <div class="summary">
+            <div class="summary-card">
+                <div class="label">Total Tests</div>
+                <div class="number">23</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Passed</div>
+                <div class="number passed">19</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Failed</div>
+                <div class="number failed">2</div>
+            </div>
+            <div class="summary-card">
+                <div class="label">Skipped</div>
+                <div class="number skipped">0</div>
+            </div>
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Deployment Validation</span>
+                <span class="suite-stats">
+                    <span class="passed">6 passed</span> •
+                    <span class="failed">0 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Namespace exists</div>
+
+                    <div class="test-message">Namespace 'pairdb' found</div>
+
+                </div>
+                <div class="test-duration">47.63ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">PostgreSQL deployed</div>
+
+                    <div class="test-message">deployment/postgres exists</div>
+
+                </div>
+                <div class="test-duration">43.23ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Redis deployed</div>
+
+                    <div class="test-message">deployment/redis exists</div>
+
+                </div>
+                <div class="test-duration">39.11ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Coordinator deployed</div>
+
+                    <div class="test-message">deployment/coordinator exists</div>
+
+                </div>
+                <div class="test-duration">41.42ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Storage Node deployed</div>
+
+                    <div class="test-message">statefulset/pairdb-storage-node exists</div>
+
+                </div>
+                <div class="test-duration">41.11ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">API Gateway deployed</div>
+
+                    <div class="test-message">deployment/api-gateway exists</div>
+
+                </div>
+                <div class="test-duration">42.83ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Pod Health Check</span>
+                <span class="suite-stats">
+                    <span class="passed">8 passed</span> •
+                    <span class="failed">0 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: api-gateway-f94985d47-4ln49</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: api-gateway-f94985d47-q2j9v</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: coordinator-75d5fc47b4-s86qx</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: coordinator-75d5fc47b4-xrxkw</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: pairdb-storage-node-0</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: pairdb-storage-node-1</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: postgres-7b679c9646-pkwkd</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Pod: redis-7486589c9f-hw457</div>
+
+                    <div class="test-message">Pod is Running</div>
+
+                    <div class="test-details">{
+  "phase": "Running",
+  "containers": 1
+}</div>
+
+                </div>
+                <div class="test-duration">53.74ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Service Health Check</span>
+                <span class="suite-stats">
+                    <span class="passed">1 passed</span> •
+                    <span class="failed">0 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">API Gateway /health</div>
+
+                    <div class="test-message">HTTP 200</div>
+
+                </div>
+                <div class="test-duration">19.94ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>CRUD Operations</span>
+                <span class="suite-stats">
+                    <span class="passed">4 passed</span> •
+                    <span class="failed">1 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Create tenant</div>
+
+                    <div class="test-message">Tenant 'test-tenant-534d1c6a' created successfully</div>
+
+                    <div class="test-details">{
+  "tenant_id": "test-tenant-534d1c6a",
+  "replication_factor": 2
+}</div>
+
+                </div>
+                <div class="test-duration">11.02ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Write operation</div>
+
+                    <div class="test-message">Wrote key 'test-key-714fd2a2' successfully</div>
+
+                    <div class="test-details">{
+  "tenant": "test-tenant-534d1c6a",
+  "key": "test-key-714fd2a2"
+}</div>
+
+                </div>
+                <div class="test-duration">27.46ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Read operation</div>
+
+                    <div class="test-message">Read key 'test-key-714fd2a2' successfully</div>
+
+                </div>
+                <div class="test-duration">7.15ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result passed">
+                <div style="flex: 1;">
+                    <div class="test-name">Update operation</div>
+
+                    <div class="test-message">Updated key 'test-key-714fd2a2' successfully</div>
+
+                </div>
+                <div class="test-duration">5.56ms</div>
+                <div class="test-status passed">PASSED</div>
+            </div>
+
+            <div class="test-result failed">
+                <div style="flex: 1;">
+                    <div class="test-name">Delete operation</div>
+
+                    <div class="test-message">Failed: HTTP Error 404: Not Found</div>
+
+                </div>
+                <div class="test-duration">4.02ms</div>
+                <div class="test-status failed">FAILED</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Write Latency (50 ops)</span>
+                <span class="suite-stats">
+                    <span class="passed">0 passed</span> •
+                    <span class="failed">0 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result warning">
+                <div style="flex: 1;">
+                    <div class="test-name">Write latency</div>
+
+                    <div class="test-message">Avg: 4.61ms, P50: 4.28ms, P95: 6.25ms, P99: 7.17ms</div>
+
+                    <div class="test-details">{
+  "operations": 50,
+  "errors": 10,
+  "avg_latency_ms": 4.61,
+  "min_latency_ms": 3.82,
+  "max_latency_ms": 7.17,
+  "p50_latency_ms": 4.28,
+  "p95_latency_ms": 6.25,
+  "p99_latency_ms": 7.17,
+  "throughput_ops_per_sec": 184.46
+}</div>
+
+                </div>
+                <div class="test-duration">216.85ms</div>
+                <div class="test-status warning">WARNING</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Read Latency (50 ops)</span>
+                <span class="suite-stats">
+                    <span class="passed">0 passed</span> •
+                    <span class="failed">1 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result failed">
+                <div style="flex: 1;">
+                    <div class="test-name">Read latency test</div>
+
+                    <div class="test-message">Failed to create tenant: HTTP 429: Too Many Requests</div>
+
+                </div>
+                <div class="test-duration">0.00ms</div>
+                <div class="test-status failed">FAILED</div>
+            </div>
+
+        </div>
+
+        <div class="suite">
+            <div class="suite-header">
+                <span>Concurrent Writes (5 threads)</span>
+                <span class="suite-stats">
+                    <span class="passed">0 passed</span> •
+                    <span class="failed">0 failed</span> •
+                    <span class="skipped">0 skipped</span>
+                </span>
+            </div>
+
+            <div class="test-result warning">
+                <div style="flex: 1;">
+                    <div class="test-name">Concurrent writes</div>
+
+                    <div class="test-message">Success: 5, Errors: 45, Avg latency: 6.24ms</div>
+
+                    <div class="test-details">{
+  "threads": 5,
+  "total_operations": 50,
+  "successful": 5,
+  "failed": 45,
+  "avg_latency_ms": 6.24,
+  "p95_latency_ms": 6.86,
+  "throughput_ops_per_sec": 96.33
+}</div>
+
+                </div>
+                <div class="test-duration">51.91ms</div>
+                <div class="test-status warning">WARNING</div>
+            </div>
+
+        </div>
+
+        <div class="footer">
+            <p>PairDB - Distributed Key-Value Store</p>
+            <p>Test execution completed in 1029.13ms</p>
+        </div>
+    </div>
+</body>
+</html>

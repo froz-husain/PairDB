@@ -9,8 +9,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/devrev/pairdb/storage-node/internal/client"
 	"github.com/devrev/pairdb/storage-node/internal/config"
 	"github.com/devrev/pairdb/storage-node/internal/handler"
+	"github.com/devrev/pairdb/storage-node/internal/health"
 	"github.com/devrev/pairdb/storage-node/internal/service"
 	"github.com/devrev/pairdb/storage-node/internal/storage/diskmanager"
 	"github.com/devrev/pairdb/storage-node/internal/util/workerpool"
@@ -39,10 +41,19 @@ func main() {
 		logger.Fatal("Failed to load config", zap.Error(err))
 	}
 
+	// Override node_id from environment variable if set
+	if nodeID := os.Getenv("NODE_ID"); nodeID != "" {
+		cfg.Server.NodeID = nodeID
+		logger.Info("Node ID overridden from environment variable", zap.String("node_id", nodeID))
+	}
+
 	logger.Info("Configuration loaded",
 		zap.String("node_id", cfg.Server.NodeID),
 		zap.String("host", cfg.Server.Host),
-		zap.Int("port", cfg.Server.Port))
+		zap.Int("port", cfg.Server.Port),
+		zap.Bool("coordinator_enabled", cfg.Coordinator.Enabled),
+		zap.String("coordinator_host", cfg.Coordinator.Host),
+		zap.Int("coordinator_port", cfg.Coordinator.Port))
 
 	// Create data directories
 	if err := os.MkdirAll(cfg.Storage.CommitLogDir, 0755); err != nil {
@@ -191,6 +202,24 @@ func main() {
 		}
 	}
 
+	// Initialize health checker
+	healthChecker := health.NewHealthChecker(&health.HealthCheckConfig{
+		NodeID:  cfg.Server.NodeID,
+		DataDir: cfg.Storage.DataDir,
+	}, logger)
+
+	// Start health check background process
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go healthChecker.Start(ctx)
+
+	// Start health check HTTP server in background
+	go func() {
+		if err := healthChecker.StartHealthServer(":9091"); err != nil {
+			logger.Error("Health check HTTP server failed", zap.Error(err))
+		}
+	}()
+
 	// Initialize handlers
 	storageHandler := handler.NewStorageHandler(storageSvc, streamingMgr, logger)
 
@@ -211,6 +240,60 @@ func main() {
 	logger.Info("Storage node service starting",
 		zap.String("node_id", cfg.Server.NodeID),
 		zap.String("address", addr))
+
+	// Mark service as ready after all initialization
+	healthChecker.SetReadiness(true)
+
+	// Register with coordinator if enabled
+	if cfg.Coordinator.Enabled {
+		go func() {
+			coordinatorClient, err := client.NewCoordinatorClient(cfg.Coordinator.Host, cfg.Coordinator.Port, logger)
+			if err != nil {
+				logger.Error("Failed to create coordinator client", zap.Error(err))
+				return
+			}
+			defer coordinatorClient.Close()
+
+			// Build DNS name for StatefulSet pod
+			// Format: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+			registrationHost := cfg.Server.Host
+
+			// Check if running in Kubernetes (POD_NAMESPACE env var is set)
+			if podNamespace := os.Getenv("POD_NAMESPACE"); podNamespace != "" {
+				// Use headless service DNS name instead of pod IP
+				// This ensures stable addressing even if pods restart
+				serviceName := "pairdb-storage-node-headless"
+				registrationHost = fmt.Sprintf("%s.%s.%s.svc.cluster.local",
+					cfg.Server.NodeID, serviceName, podNamespace)
+				logger.Info("Using Kubernetes DNS name for registration",
+					zap.String("dns_name", registrationHost))
+			} else if podIP := os.Getenv("POD_IP"); podIP != "" {
+				// Fallback to pod IP for non-Kubernetes environments
+				registrationHost = podIP
+				logger.Info("Using pod IP for registration (non-Kubernetes environment)",
+					zap.String("pod_ip", registrationHost))
+			}
+
+			// Register with retry
+			regCtx, regCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer regCancel()
+
+			err = coordinatorClient.RegisterWithRetry(
+				regCtx,
+				cfg.Server.NodeID,
+				registrationHost,
+				cfg.Server.Port,
+				cfg.Coordinator.VirtualNodes,
+				cfg.Coordinator.MaxRetries,
+				cfg.Coordinator.RetryInterval,
+			)
+			if err != nil {
+				logger.Error("Failed to register with coordinator after retries", zap.Error(err))
+			}
+		}()
+	} else {
+		logger.Warn("Coordinator registration disabled - node will not be discoverable")
+	}
 
 	// Handle graceful shutdown
 	go func() {

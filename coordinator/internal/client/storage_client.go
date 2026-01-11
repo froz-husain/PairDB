@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/devrev/pairdb/coordinator/internal/model"
-	pb "github.com/devrev/pairdb/coordinator/pkg/proto"
+	storagepb "github.com/devrev/pairdb/storage-node/pkg/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -51,18 +51,17 @@ func (c *StorageClient) Write(
 		return nil, err
 	}
 
-	client := pb.NewStorageServiceClient(conn)
+	client := storagepb.NewStorageNodeServiceClient(conn)
 
 	// Set timeout
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	resp, err := client.Write(ctx, &pb.WriteRequest{
+	resp, err := client.Write(ctx, &storagepb.WriteRequest{
 		TenantId:    tenantID,
 		Key:         key,
 		Value:       value,
 		VectorClock: c.toProtoVectorClock(vectorClock),
-		Timestamp:   time.Now().UnixMilli(),
 	})
 
 	if err != nil {
@@ -76,7 +75,7 @@ func (c *StorageClient) Write(
 	return &StorageResponse{
 		NodeID:      node.NodeID,
 		Success:     resp.Success,
-		VectorClock: c.fromProtoVectorClock(resp.VectorClock),
+		VectorClock: c.fromProtoVectorClock(resp.UpdatedVectorClock),
 	}, nil
 }
 
@@ -91,13 +90,13 @@ func (c *StorageClient) Read(
 		return nil, err
 	}
 
-	client := pb.NewStorageServiceClient(conn)
+	client := storagepb.NewStorageNodeServiceClient(conn)
 
 	// Set timeout
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	resp, err := client.Read(ctx, &pb.ReadRequest{
+	resp, err := client.Read(ctx, &storagepb.ReadRequest{
 		TenantId: tenantID,
 		Key:      key,
 	})
@@ -115,46 +114,7 @@ func (c *StorageClient) Read(
 		Success:     resp.Success,
 		Value:       resp.Value,
 		VectorClock: c.fromProtoVectorClock(resp.VectorClock),
-		Timestamp:   resp.Timestamp,
-		Found:       resp.Found,
-	}, nil
-}
-
-// Delete sends delete request to storage node
-func (c *StorageClient) Delete(
-	ctx context.Context,
-	node *model.StorageNode,
-	tenantID, key string,
-	vectorClock model.VectorClock,
-) (*StorageResponse, error) {
-	conn, err := c.getConnection(node)
-	if err != nil {
-		return nil, err
-	}
-
-	client := pb.NewStorageServiceClient(conn)
-
-	// Set timeout
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-
-	resp, err := client.Delete(ctx, &pb.DeleteRequest{
-		TenantId:    tenantID,
-		Key:         key,
-		VectorClock: c.toProtoVectorClock(vectorClock),
-	})
-
-	if err != nil {
-		return &StorageResponse{
-			NodeID:  node.NodeID,
-			Success: false,
-			Error:   err,
-		}, err
-	}
-
-	return &StorageResponse{
-		NodeID:  node.NodeID,
-		Success: resp.Success,
+		Found:       resp.Success && len(resp.Value) > 0,
 	}, nil
 }
 
@@ -172,18 +132,17 @@ func (c *StorageClient) Repair(
 		return err
 	}
 
-	client := pb.NewStorageServiceClient(conn)
+	client := storagepb.NewStorageNodeServiceClient(conn)
 
 	// Set timeout
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	_, err = client.Repair(ctx, &pb.RepairRequest{
+	_, err = client.Repair(ctx, &storagepb.RepairRequest{
 		TenantId:    tenantID,
 		Key:         key,
 		Value:       value,
 		VectorClock: c.toProtoVectorClock(vectorClock),
-		Timestamp:   timestamp,
 	})
 
 	return err
@@ -225,19 +184,19 @@ func (c *StorageClient) getConnection(node *model.StorageNode) (*grpc.ClientConn
 }
 
 // toProtoVectorClock converts model vector clock to proto
-func (c *StorageClient) toProtoVectorClock(vc model.VectorClock) *pb.VectorClock {
-	entries := make([]*pb.VectorClockEntry, len(vc.Entries))
+func (c *StorageClient) toProtoVectorClock(vc model.VectorClock) *storagepb.VectorClock {
+	entries := make([]*storagepb.VectorClockEntry, len(vc.Entries))
 	for i, entry := range vc.Entries {
-		entries[i] = &pb.VectorClockEntry{
+		entries[i] = &storagepb.VectorClockEntry{
 			CoordinatorNodeId: entry.CoordinatorNodeID,
 			LogicalTimestamp:  entry.LogicalTimestamp,
 		}
 	}
-	return &pb.VectorClock{Entries: entries}
+	return &storagepb.VectorClock{Entries: entries}
 }
 
 // fromProtoVectorClock converts proto vector clock to model
-func (c *StorageClient) fromProtoVectorClock(vc *pb.VectorClock) model.VectorClock {
+func (c *StorageClient) fromProtoVectorClock(vc *storagepb.VectorClock) model.VectorClock {
 	if vc == nil {
 		return model.VectorClock{Entries: []model.VectorClockEntry{}}
 	}

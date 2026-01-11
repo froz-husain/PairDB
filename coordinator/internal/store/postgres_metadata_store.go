@@ -143,7 +143,7 @@ func (s *PostgresMetadataStore) DeleteTenant(ctx context.Context, tenantID strin
 // ListStorageNodes retrieves all storage nodes
 func (s *PostgresMetadataStore) ListStorageNodes(ctx context.Context) ([]*model.StorageNode, error) {
 	query := `
-		SELECT node_id, host, port, status, virtual_nodes
+		SELECT node_id, host, port, status, state, virtual_nodes
 		FROM storage_nodes
 		WHERE status != 'inactive'
 		ORDER BY node_id
@@ -158,9 +158,11 @@ func (s *PostgresMetadataStore) ListStorageNodes(ctx context.Context) ([]*model.
 	nodes := make([]*model.StorageNode, 0)
 	for rows.Next() {
 		var node model.StorageNode
-		if err := rows.Scan(&node.NodeID, &node.Host, &node.Port, &node.Status, &node.VirtualNodes); err != nil {
+		var stateStr string
+		if err := rows.Scan(&node.NodeID, &node.Host, &node.Port, &node.Status, &stateStr, &node.VirtualNodes); err != nil {
 			return nil, err
 		}
+		node.State = model.NodeState(stateStr)
 		nodes = append(nodes, &node)
 	}
 
@@ -170,8 +172,8 @@ func (s *PostgresMetadataStore) ListStorageNodes(ctx context.Context) ([]*model.
 // AddStorageNode adds a new storage node
 func (s *PostgresMetadataStore) AddStorageNode(ctx context.Context, node *model.StorageNode) error {
 	query := `
-		INSERT INTO storage_nodes (node_id, host, port, status, virtual_nodes, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		INSERT INTO storage_nodes (node_id, host, port, status, state, virtual_nodes, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 	`
 
 	_, err := s.pool.Exec(ctx, query,
@@ -179,6 +181,7 @@ func (s *PostgresMetadataStore) AddStorageNode(ctx context.Context, node *model.
 		node.Host,
 		node.Port,
 		node.Status,
+		node.State,
 		node.VirtualNodes,
 	)
 

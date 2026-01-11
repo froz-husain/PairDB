@@ -1,18 +1,29 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git make protobuf-dev
+
+# Disable Go workspace mode to avoid module resolution issues
+ENV GOWORK=off
 
 # Set working directory
 WORKDIR /app
 
 # Copy go mod files
-COPY go.mod go.sum ./
+COPY storage-node/go.mod storage-node/go.sum ./
+
+# Copy coordinator dependency
+COPY coordinator /coordinator
+
+# Remove any go.work files that might have been copied
+RUN rm -f go.work go.work.sum
+
+# Download dependencies
 RUN go mod download
 
-# Copy source code
-COPY . .
+# Copy storage-node source code
+COPY storage-node .
 
 # Generate protobuf code
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \

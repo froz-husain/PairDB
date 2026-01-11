@@ -1,371 +1,218 @@
-# Local Development Setup for pairDB
+# PairDB Local Setup
 
-This directory contains scripts and configurations to deploy pairDB on a local Kubernetes cluster (Minikube) with minimal resource requirements suitable for development and testing.
+This directory contains scripts and Kubernetes manifests for deploying PairDB locally using Minikube.
 
 ## Prerequisites
 
-- **Minikube** installed and running
-- **kubectl** configured to use Minikube
-- **Docker** (Minikube will use it)
-- At least **4GB RAM** and **2 CPU cores** available for Minikube
+- [Minikube](https://minikube.sigs.k8s.io/docs/start/) installed and running
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) installed
+- [Docker](https://docs.docker.com/get-docker/) installed
+- Go 1.24+ (for building from source)
 
 ## Quick Start
 
-1. **Start Minikube** (if not already running):
-   ```bash
-   minikube start --memory=4096 --cpus=2
-   ```
-
-2. **Enable required addons**:
-   ```bash
-   minikube addons enable ingress
-   ```
-
-3. **Deploy all components**:
-   ```bash
-   ./deploy.sh
-   ```
-
-4. **Verify deployment**:
-   ```bash
-   kubectl get pods -n pairdb
-   ```
-
-## What Gets Deployed
-
-This local setup deploys:
-
-1. **PostgreSQL** - Metadata store (single instance, small resources)
-2. **Redis** - Cache and idempotency store (single instance, small resources)
-3. **Storage Nodes** - 2 replicas (StatefulSet with 100MB storage each)
-4. **Coordinator** - 2 replicas (Deployment)
-5. **API Gateway** - 2 replicas (Deployment)
-
-## Resource Requirements
-
-### Per Component (Local Setup)
-
-| Component | CPU Request | Memory Request | CPU Limit | Memory Limit | Storage |
-|-----------|-------------|----------------|-----------|--------------|---------|
-| PostgreSQL | 100m | 256Mi | 500m | 512Mi | 1Gi |
-| Redis | 50m | 128Mi | 200m | 256Mi | - |
-| Storage Node | 100m | 256Mi | 500m | 512Mi | 100Mi |
-| Coordinator | 100m | 128Mi | 500m | 256Mi | - |
-| API Gateway | 50m | 64Mi | 200m | 128Mi | - |
-
-**Total Resources (approximate)**:
-- CPU: ~1 core
-- Memory: ~1.5GB
-- Storage: ~2.5GB
-
-## Directory Structure
-
-```
-local-setup/
-├── README.md                    # This file
-├── deploy.sh                    # Main deployment script
-├── cleanup.sh                   # Cleanup script
-├── k8s/                         # Kubernetes manifests
-│   ├── namespace.yaml           # Namespace definition
-│   ├── postgres/                # PostgreSQL deployment
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── pvc.yaml
-│   ├── redis/                   # Redis deployment
-│   │   ├── deployment.yaml
-│   │   └── service.yaml
-│   ├── storage-node/            # Storage node manifests
-│   │   ├── statefulset.yaml
-│   │   ├── service.yaml
-│   │   ├── service-headless.yaml
-│   │   └── configmap.yaml
-│   ├── coordinator/             # Coordinator manifests
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   ├── configmap.yaml
-│   │   └── secrets.yaml
-│   └── api-gateway/             # API Gateway manifests
-│       ├── deployment.yaml
-│       ├── service.yaml
-│       └── configmap.yaml
-└── scripts/                     # Helper scripts
-    ├── init-db.sh               # Database initialization
-    └── wait-for-services.sh      # Wait for services to be ready
-```
-
-## Deployment Steps
-
-### 1. Build Docker Images
-
-First, build the Docker images for all components:
+### 1. Start Minikube
 
 ```bash
-# Build API Gateway
-cd ../api-gateway
-make docker
-minikube image load pairdb/api-gateway:latest
-
-# Build Coordinator
-cd ../coordinator
-make docker-build
-minikube image load pairdb/coordinator:latest
-
-# Build Storage Node
-cd ../storage-node
-make docker-build
-minikube image load pairdb/storage-node:latest
+minikube start --cpus=4 --memory=8192
 ```
 
-Or use the provided script:
+### 2. Deploy PairDB
 
 ```bash
-./scripts/build-images.sh
+cd scripts
+./deploy-local.sh
 ```
 
-### 2. Deploy Infrastructure
+This script will:
+- Build coordinator and storage-node Docker images
+- Load images into Minikube
+- Deploy PostgreSQL and Redis
+- Deploy coordinator and storage-node services
+- Wait for services to be ready
 
-Deploy PostgreSQL and Redis:
-
-```bash
-kubectl apply -f k8s/postgres/
-kubectl apply -f k8s/redis/
-```
-
-Wait for them to be ready:
-
-```bash
-kubectl wait --for=condition=ready pod -l app=postgres -n pairdb --timeout=120s
-kubectl wait --for=condition=ready pod -l app=redis -n pairdb --timeout=120s
-```
-
-### 3. Initialize Database
-
-Run database migrations:
-
-```bash
-# Get PostgreSQL pod name
-PG_POD=$(kubectl get pod -l app=postgres -n pairdb -o jsonpath='{.items[0].metadata.name}')
-
-# Copy migration file
-kubectl cp ../coordinator/migrations/001_initial_schema.sql pairdb/$PG_POD:/tmp/
-
-# Execute migration
-kubectl exec -n pairdb $PG_POD -- psql -U coordinator -d pairdb_metadata -f /tmp/001_initial_schema.sql
-```
-
-Or use the provided script:
-
-```bash
-./scripts/init-db.sh
-```
-
-### 4. Deploy Application Components
-
-Deploy in order:
-
-```bash
-# 1. Storage Nodes (StatefulSet)
-kubectl apply -f k8s/storage-node/
-
-# 2. Coordinator
-kubectl apply -f k8s/coordinator/
-
-# 3. API Gateway
-kubectl apply -f k8s/api-gateway/
-```
-
-Or use the main deployment script:
-
-```bash
-./deploy.sh
-```
-
-## Accessing Services
-
-### Port Forwarding
-
-```bash
-# API Gateway
-kubectl port-forward -n pairdb svc/api-gateway 8080:8080
-
-# Coordinator (if needed)
-kubectl port-forward -n pairdb svc/coordinator 50051:50051
-
-# PostgreSQL (if needed)
-kubectl port-forward -n pairdb svc/postgres 5432:5432
-
-# Redis (if needed)
-kubectl port-forward -n pairdb svc/redis 6379:6379
-```
-
-### Using Minikube Service
-
-```bash
-# Get API Gateway URL
-minikube service api-gateway -n pairdb --url
-```
-
-## Testing the Deployment
-
-### 1. Check Pod Status
+### 3. Verify Deployment
 
 ```bash
 kubectl get pods -n pairdb
 ```
 
-All pods should be in `Running` state.
+All pods should eventually be in `Running` status.
 
-### 2. Check Service Endpoints
+### 4. View Logs
 
+**Coordinator logs:**
 ```bash
-kubectl get svc -n pairdb
+kubectl logs -n pairdb -l app=coordinator -f
 ```
 
-### 3. Test API Gateway
-
+**Storage-node logs:**
 ```bash
-# Create a tenant
-curl -X POST http://localhost:8080/v1/tenants \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "test-tenant",
-    "replication_factor": 2
-  }'
-
-# Write a key-value pair
-curl -X POST http://localhost:8080/v1/key-value \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "test-tenant",
-    "key": "test-key",
-    "value": "test-value",
-    "consistency": "quorum"
-  }'
-
-# Read a key-value pair
-curl "http://localhost:8080/v1/key-value?tenant_id=test-tenant&key=test-key&consistency=quorum"
+kubectl logs -n pairdb -l app=pairdb-storage-node -f
 ```
 
-## Monitoring
+### 5. Cleanup
 
-### View Logs
-
-```bash
-# API Gateway logs
-kubectl logs -f -l app.kubernetes.io/name=api-gateway -n pairdb
-
-# Coordinator logs
-kubectl logs -f -l app=coordinator -n pairdb
-
-# Storage Node logs
-kubectl logs -f -l app=pairdb-storage-node -n pairdb
-```
-
-### View Metrics
+To remove the entire deployment:
 
 ```bash
-# Port forward metrics endpoints
-kubectl port-forward -n pairdb svc/api-gateway 9090:9090
-curl http://localhost:9090/metrics
+cd scripts
+./cleanup-local.sh
 ```
+
+## Architecture
+
+The local deployment includes:
+
+- **Coordinator** (2 replicas): Handles client requests, routing, and consistency
+- **Storage Node** (2 replicas): Stores data using LSM-tree architecture
+- **PostgreSQL**: Metadata store for coordinator
+- **Redis**: Idempotency store for coordinator
+
+## Known Issues and Workarounds
+
+### Coordinator Configuration
+
+The coordinator requires environment variables to override the default config file values. The deployment manifest properly sets these:
+
+- `DATABASE_HOST`: postgres.pairdb.svc.cluster.local
+- `DATABASE_PORT`: 5432
+- `DATABASE_NAME`: pairdb_metadata
+- `DATABASE_USER`: From secret
+- `DATABASE_PASSWORD`: From secret
+- `REDIS_HOST`: redis.pairdb.svc.cluster.local
+- `REDIS_PORT`: 6379
+
+### Storage Node Health Probes
+
+Health probes are currently disabled in the StatefulSet configuration. The HTTP health server code exists in the storage-node but needs debugging before it can be reliably deployed.
+
+**Status**:
+- ✅ HTTP handlers implemented in [storage-node/internal/health/health_check.go](../storage-node/internal/health/health_check.go)
+- ✅ Health server initialization added to [storage-node/cmd/storage/main.go](../storage-node/cmd/storage/main.go:195-210)
+- ⚠️ Minikube image caching prevents deployment - needs investigation
+- ⚠️ Health probes disabled in [k8s/storage-node/statefulset.yaml](k8s/storage-node/statefulset.yaml:60-84)
+
+**Temporary workaround**: All health probes (startup, liveness, readiness) are commented out to ensure stable deployments.
+
+**TODO**:
+1. Debug image loading issue in Minikube
+2. Verify HTTP health server starts correctly on port 9091
+3. Re-enable health probes once verified working
 
 ## Troubleshooting
 
-### Pods Not Starting
+### Storage-Node Restart Loop (FIXED)
 
-1. Check pod status:
-   ```bash
-   kubectl describe pod <pod-name> -n pairdb
-   ```
+**Symptom**: Storage-node pods show `0/1 Running` with frequent restarts (e.g., `Running 3 (19s ago) 3m20s`).
 
-2. Check events:
-   ```bash
-   kubectl get events -n pairdb --sort-by='.lastTimestamp'
-   ```
+**Root Cause**: Kubernetes startup probe was checking HTTP endpoint `/health/live` on port 9091, but the HTTP health server wasn't running correctly.
 
-3. Check resource availability:
-   ```bash
-   minikube status
-   kubectl top nodes
-   ```
+**Fix Applied**:
+1. Disabled all health probes in [k8s/storage-node/statefulset.yaml](k8s/storage-node/statefulset.yaml:60-84)
+2. Implemented HTTP health handlers in storage-node code (for future use)
+3. Updated deployment script to avoid Minikube image caching issues
 
-### Database Connection Issues
+**Verification**: Run `kubectl get pods -n pairdb` - storage-node pods should show `1/1 Running` with 0 restarts.
 
-1. Verify PostgreSQL is running:
-   ```bash
-   kubectl get pod -l app=postgres -n pairdb
-   ```
+### Pods in CrashLoopBackOff
 
-2. Check database logs:
-   ```bash
-   kubectl logs -l app=postgres -n pairdb
-   ```
-
-3. Test connection:
-   ```bash
-   kubectl exec -it -n pairdb $(kubectl get pod -l app=postgres -n pairdb -o jsonpath='{.items[0].metadata.name}') -- psql -U coordinator -d pairdb_metadata
-   ```
-
-### Storage Node Issues
-
-1. Check persistent volumes:
-   ```bash
-   kubectl get pvc -n pairdb
-   ```
-
-2. Check storage node logs:
-   ```bash
-   kubectl logs -l app=pairdb-storage-node -n pairdb
-   ```
-
-## Cleanup
-
-To remove all deployed resources:
-
+**Check logs:**
 ```bash
-./cleanup.sh
+kubectl logs -n pairdb <pod-name>
+kubectl describe pod -n pairdb <pod-name>
 ```
 
-Or manually:
+**Common issues:**
+
+1. **Coordinator can't connect to PostgreSQL:**
+   - Verify PostgreSQL is running: `kubectl get pods -n pairdb -l app=postgres`
+   - Check if secrets exist: `kubectl get secrets -n pairdb coordinator-secrets`
+   - Verify environment variables: `kubectl describe pod -n pairdb <coordinator-pod>`
+
+2. **Image pull issues:**
+   - Ensure images are loaded into Minikube: `minikube image ls | grep pairdb`
+   - If missing, rebuild and reload images
+
+3. **Storage node health check failures:**
+   - This is expected - health probes are temporarily disabled
+   - Pods should show as `1/1 Running` once deployed
+
+4. **Minikube image caching issues:**
+   - Minikube caches images with `:latest` tag, causing old images to be used
+   - **Solution**: Deploy script now uses timestamp-based tags (e.g., `v20250112-143045`)
+   - To manually clear cache: `minikube image rm <image-name>`
+
+### Services Not Accessible
+
+**Port forward to test locally:**
+```bash
+# Coordinator gRPC
+kubectl port-forward -n pairdb svc/coordinator 50051:50051
+
+# Storage Node gRPC
+kubectl port-forward -n pairdb svc/pairdb-storage-node 50052:50052
+```
+
+## Development Workflow
+
+### Rebuilding After Code Changes
+
+The deploy script now handles image versioning automatically. Simply re-run the deployment:
 
 ```bash
-kubectl delete namespace pairdb
+cd local-setup/scripts
+./deploy-local.sh
 ```
+
+This will:
+1. Build new images with timestamp-based tags
+2. Load images into Minikube
+3. Verify images are loaded
+4. Update deployments to use new images
+5. Wait for services to stabilize
+
+### Manual Rebuilding (Advanced)
+
+If you need to manually rebuild specific components:
+
+**Coordinator:**
+```bash
+cd coordinator
+IMAGE_TAG="v$(date +%Y%m%d-%H%M%S)"
+docker build -t pairdb/coordinator:${IMAGE_TAG} -f deployments/docker/Dockerfile .
+minikube image load pairdb/coordinator:${IMAGE_TAG}
+kubectl set image deployment/coordinator -n pairdb coordinator=pairdb/coordinator:${IMAGE_TAG}
+```
+
+**Storage Node:**
+```bash
+cd storage-node
+IMAGE_TAG="v$(date +%Y%m%d-%H%M%S)"
+docker build -t pairdb/storage-node:${IMAGE_TAG} -f Dockerfile .
+minikube image load pairdb/storage-node:${IMAGE_TAG}
+kubectl set image statefulset/pairdb-storage-node -n pairdb storage-node=pairdb/storage-node:${IMAGE_TAG}
+```
+
+**Important**: Avoid using `:latest` tag as Minikube caches it aggressively.
 
 ## Configuration
 
-All configurations are in the `k8s/` directory. Key configuration files:
+### Coordinator Config
 
-- **ConfigMaps**: Non-sensitive configuration
-- **Secrets**: Sensitive data (passwords, etc.)
-- **Deployments/StatefulSets**: Application definitions with resource limits
+Environment variables can be modified in:
+- `k8s/coordinator/deployment.yaml`
+- `k8s/coordinator/secrets.yaml`
 
-## Resource Scaling
+### Storage Node Config
 
-To increase resources for local development:
-
-1. Edit the manifests in `k8s/` directory
-2. Update resource requests/limits
-3. Reapply:
-   ```bash
-   kubectl apply -f k8s/
-   ```
-
-## Notes
-
-- This setup is **NOT** for production use
-- Storage is minimal (100MB per storage node)
-- Replication factors are reduced (2 replicas instead of 3)
-- No persistent backups or disaster recovery
-- Single-node PostgreSQL and Redis (no high availability)
+ConfigMap values can be modified in:
+- `k8s/storage-node/configmap.yaml`
 
 ## Next Steps
 
-After successful deployment:
-
-1. Review component logs
-2. Test API endpoints
-3. Monitor resource usage
-4. Scale components as needed
-5. Explore the [main README](../README.md) for more details
-
+- [ ] Implement HTTP health server for storage-node
+- [ ] Add integration tests
+- [ ] Add API Gateway deployment
+- [ ] Create end-to-end test suite
+- [ ] Add monitoring (Prometheus/Grafana)

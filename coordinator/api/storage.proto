@@ -2,87 +2,16 @@ syntax = "proto3";
 
 package proto;
 
-import "api/coordinator.proto";
+import "api/common.proto";
 
 option go_package = "github.com/devrev/pairdb/coordinator/pkg/proto;proto";
 
 // StorageService is the gRPC service for storage nodes
-// Note: VectorClock types are defined in coordinator.proto
+// Note: Common message types are defined in common.proto
 service StorageService {
   rpc Write(WriteRequest) returns (WriteResponse);
   rpc Read(ReadRequest) returns (ReadResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
   rpc Repair(RepairRequest) returns (RepairResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-}
-
-// Storage Operations
-
-message WriteRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  VectorClock vector_clock = 4;
-  int64 timestamp = 5;  // Unix timestamp in milliseconds
-}
-
-message WriteResponse {
-  bool success = 1;
-  string key = 2;
-  VectorClock vector_clock = 3;
-  string error_message = 4;
-}
-
-message ReadRequest {
-  string tenant_id = 1;
-  string key = 2;
-}
-
-message ReadResponse {
-  bool success = 1;
-  string key = 2;
-  bytes value = 3;
-  VectorClock vector_clock = 4;
-  int64 timestamp = 5;  // Unix timestamp in milliseconds
-  bool found = 6;  // false if key not found
-  string error_message = 7;
-}
-
-message DeleteRequest {
-  string tenant_id = 1;
-  string key = 2;
-  VectorClock vector_clock = 3;
-}
-
-message DeleteResponse {
-  bool success = 1;
-  string key = 2;
-  string error_message = 3;
-}
-
-message RepairRequest {
-  string tenant_id = 1;
-  string key = 2;
-  bytes value = 3;
-  VectorClock vector_clock = 4;
-  int64 timestamp = 5;
-}
-
-message RepairResponse {
-  bool success = 1;
-  string key = 2;
-  string error_message = 3;
-}
-
-message HealthCheckRequest {
-  string service = 1;
-}
-
-message HealthCheckResponse {
-  enum ServingStatus {
-    UNKNOWN = 0;
-    SERVING = 1;
-    NOT_SERVING = 2;
-  }
-  ServingStatus status = 1;
 }

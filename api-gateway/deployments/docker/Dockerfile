@@ -4,11 +4,17 @@ FROM golang:1.24-alpine AS builder
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
 
+# Disable Go workspace mode to avoid module resolution issues
+ENV GOWORK=off
+
 # Set working directory
 WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
+
+# Remove any go.work files that might have been copied
+RUN rm -f go.work go.work.sum
 
 # Download dependencies
 RUN go mod download

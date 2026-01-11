@@ -46,7 +46,11 @@ func main() {
 
 	logger.Info("Configuration loaded",
 		zap.String("node_id", cfg.Server.NodeID),
-		zap.Int("port", cfg.Server.Port))
+		zap.Int("port", cfg.Server.Port),
+		zap.String("database_host", cfg.Database.Host),
+		zap.Int("database_port", cfg.Database.Port),
+		zap.String("database_name", cfg.Database.Database),
+		zap.String("database_user", cfg.Database.User))
 
 	// Initialize metrics
 	_ = metrics.NewMetrics()
@@ -109,8 +113,15 @@ func main() {
 	idempotencyService := service.NewIdempotencyService(idempotencyStore, 24*time.Hour, logger)
 	conflictService := service.NewConflictService(storageClient, vectorClockService, 10, cfg.Consistency.RepairAsync, logger)
 
-	// Initialize migration service for dual-write during node addition
-	migrationService := service.NewMigrationService(metadataStore, routingService, storageClient, logger)
+	// Initialize hinted handoff service (V2 - Cassandra pattern)
+	hintedHandoffService := service.NewHintedHandoffService(
+		storageClient,
+		10000,          // max hints per node
+		3*time.Hour,    // hint TTL
+		10*time.Second, // replay interval
+		logger,
+	)
+	hintedHandoffService.Start()
 
 	// Initialize key range service for Phase 2 streaming
 	keyRangeService := service.NewKeyRangeService(logger)
@@ -118,19 +129,19 @@ func main() {
 	// Initialize storage node client for Phase 2 streaming
 	storageNodeClient := client.NewStorageNodeClient(30*time.Second, logger)
 
-	// Initialize hint replay service for Phase 6 (hinted handoff)
+	// Initialize hint replay service for Phase 6 (hinted handoff from database)
 	hintReplayService := service.NewHintReplayService(hintStore, storageNodeClient, logger)
 
-	coordinatorService := service.NewCoordinatorService(
+	// Use V2 coordinator service (Cassandra/DynamoDB pattern - no migration checks, immediate ring updates)
+	coordinatorService := service.NewCoordinatorServiceV2(
 		tenantService,
 		routingService,
 		consistencyService,
 		idempotencyService,
 		conflictService,
 		vectorClockService,
-		migrationService,
+		hintedHandoffService,
 		storageClient,
-		hintStore,
 		cfg.Consistency.WriteTimeout,
 		cfg.Consistency.ReadTimeout,
 		logger,

@@ -32,8 +32,8 @@ proto: ## Generate proto files
 	@echo "Generating proto files..."
 	@mkdir -p $(PROTO_OUT_DIR)
 	@export PATH="$$PATH:$$(go env GOPATH)/bin" && \
-	protoc --go_out=$(PROTO_OUT_DIR) --go_opt=paths=source_relative \
-		--go-grpc_out=$(PROTO_OUT_DIR) --go-grpc_opt=paths=source_relative \
+	protoc -I. --go_out=. --go_opt=module=github.com/devrev/pairdb/coordinator \
+		--go-grpc_out=. --go-grpc_opt=module=github.com/devrev/pairdb/coordinator \
 		$(PROTO_DIR)/*.proto
 	@echo "Proto files generated successfully"
 

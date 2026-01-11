@@ -5,7 +5,8 @@
 ### 1.1 Core Operations
 - **Store Operations**: Store key-value pairs where keys are strings and values are opaque objects (strings, lists, objects, etc.)
 - **Retrieve Operations**: Retrieve values by key with configurable consistency guarantees
-- **Consistency Tuning**: Support multiple consistency levels (one, quorum, all) at SDK or per-request level
+- **Delete Operations**: Delete key-value pairs using tombstone markers with configurable consistency guarantees
+- **Consistency Tuning**: Support multiple consistency levels (one, quorum, all) at SDK or per-request level for all operations
 - **Conflict Resolution**: Use vector clocks to detect and resolve conflicts between replicas
 
 ### 1.2 Multi-Tenancy
@@ -50,6 +51,7 @@
 ### 3.2 Key-Value APIs
 - POST /v1/key-value: Store key-value pair with optional idempotency key
 - GET /v1/key-value: Retrieve value by key with consistency level
+- DELETE /v1/key-value: Delete key-value pair with consistency level and vector clock
 
 ## 4. Data Requirements
 

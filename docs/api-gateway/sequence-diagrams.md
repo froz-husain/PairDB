@@ -65,7 +65,40 @@ sequenceDiagram
     API Gateway-->>Client: 200 OK with JSON
 ```
 
-## 3. Create Tenant Flow
+## 3. Delete Key-Value Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API Gateway
+    participant Middleware
+    participant Handler
+    participant Converter
+    participant CoordinatorClient
+    participant Coordinator
+
+    Client->>API Gateway: DELETE /v1/key-value?key=...
+    API Gateway->>Middleware: Request
+    Middleware->>Middleware: Authenticate & Extract Tenant
+    Middleware->>Middleware: Rate Limit Check
+    Middleware->>Handler: Forward Request
+    Handler->>Converter: Convert HTTP to gRPC
+    Converter->>Converter: Parse Query Params
+    Converter->>Converter: Extract X-Vector-Clock Header (optional)
+    Converter-->>Handler: DeleteKeyValueRequest
+    Handler->>CoordinatorClient: DeleteKeyValue(ctx, req)
+    CoordinatorClient->>Coordinator: gRPC Call
+    Note over Coordinator: 1. Fetch tenant config<br/>2. Get current vector clock<br/>3. Write tombstone to replicas<br/>4. Wait for consistency level
+    Coordinator-->>CoordinatorClient: DeleteKeyValueResponse
+    CoordinatorClient-->>Handler: Response
+    Handler->>Converter: Convert gRPC to HTTP
+    Converter->>Converter: Format JSON Response
+    Converter-->>Handler: HTTP Response
+    Handler->>API Gateway: Write Response
+    API Gateway-->>Client: 200 OK with JSON
+```
+
+## 4. Create Tenant Flow
 
 ```mermaid
 sequenceDiagram
@@ -250,6 +283,18 @@ sequenceDiagram
 1. Client sends HTTP GET request with query parameters
 2. Similar flow to write, but reads from coordinator
 3. Returns key-value pair with vector clock
+
+### Delete Key-Value Flow
+1. Client sends HTTP DELETE request with query parameters
+2. Middleware authenticates and extracts tenant ID
+3. Handler extracts optional vector clock from X-Vector-Clock header
+4. Coordinator fetches tenant configuration from metadata store
+5. Coordinator reads current value to get latest vector clock (if not provided)
+6. Coordinator increments vector clock for delete operation
+7. Coordinator writes tombstone markers to replica nodes based on consistency level
+8. Waits for acknowledgments per consistency level (one/quorum/all)
+9. Returns success response with tombstone vector clock
+10. Tombstones eventually removed during compaction
 
 ### Create Tenant Flow
 1. Admin client creates new tenant

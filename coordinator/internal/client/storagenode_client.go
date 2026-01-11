@@ -6,18 +6,17 @@ import (
 	"time"
 
 	"github.com/devrev/pairdb/coordinator/internal/model"
+	storagepb "github.com/devrev/pairdb/storage-node/pkg/proto"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
-	pb "github.com/devrev/pairdb/storage-node/pkg/proto"
 )
 
 // StorageNodeClient provides APIs for coordinator to communicate with storage nodes
 // Specifically for streaming operations during node addition/removal
 type StorageNodeClient struct {
 	connections map[string]*grpc.ClientConn // nodeID -> connection
-	clients     map[string]pb.StorageNodeServiceClient
+	clients     map[string]storagepb.StorageNodeServiceClient
 	timeout     time.Duration
 	logger      *zap.Logger
 }
@@ -30,7 +29,7 @@ func NewStorageNodeClient(timeout time.Duration, logger *zap.Logger) *StorageNod
 
 	return &StorageNodeClient{
 		connections: make(map[string]*grpc.ClientConn),
-		clients:     make(map[string]pb.StorageNodeServiceClient),
+		clients:     make(map[string]storagepb.StorageNodeServiceClient),
 		timeout:     timeout,
 		logger:      logger,
 	}
@@ -112,16 +111,16 @@ func (c *StorageNodeClient) StartStreaming(
 	}
 
 	// Convert key ranges to proto format
-	protoRanges := make([]*pb.StreamKeyRange, len(req.KeyRanges))
+	protoRanges := make([]*storagepb.StreamKeyRange, len(req.KeyRanges))
 	for i, kr := range req.KeyRanges {
-		protoRanges[i] = &pb.StreamKeyRange{
+		protoRanges[i] = &storagepb.StreamKeyRange{
 			StartHash: kr.StartHash,
 			EndHash:   kr.EndHash,
 		}
 	}
 
 	// Call StartStreaming RPC
-	grpcReq := &pb.StartStreamingRequest{
+	grpcReq := &storagepb.StartStreamingRequest{
 		SourceNodeId: req.SourceNodeID,
 		TargetNodeId: req.TargetNodeID,
 		TargetHost:   req.TargetHost,
@@ -164,7 +163,7 @@ func (c *StorageNodeClient) StopStreaming(
 	}
 
 	// Call StopStreaming RPC
-	grpcReq := &pb.StopStreamingRequest{
+	grpcReq := &storagepb.StopStreamingRequest{
 		SourceNodeId: req.SourceNodeID,
 		TargetNodeId: req.TargetNodeID,
 	}
@@ -203,7 +202,7 @@ func (c *StorageNodeClient) GetStreamStatus(
 	}
 
 	// Call GetStreamStatus RPC
-	grpcReq := &pb.StreamStatusRequest{
+	grpcReq := &storagepb.StreamStatusRequest{
 		SourceNodeId: req.SourceNodeID,
 		TargetNodeId: req.TargetNodeID,
 	}
@@ -244,8 +243,8 @@ func (c *StorageNodeClient) Write(
 
 	// Create vector clock for the write
 	// For simplicity, create a basic vector clock with timestamp
-	vectorClock := &pb.VectorClock{
-		Entries: []*pb.VectorClockEntry{
+	vectorClock := &storagepb.VectorClock{
+		Entries: []*storagepb.VectorClockEntry{
 			{
 				CoordinatorNodeId: "coordinator-1", // TODO: Use actual coordinator ID
 				LogicalTimestamp:  req.Timestamp.UnixNano(),
@@ -254,7 +253,7 @@ func (c *StorageNodeClient) Write(
 	}
 
 	// Call Write RPC
-	grpcReq := &pb.WriteRequest{
+	grpcReq := &storagepb.WriteRequest{
 		TenantId:    req.TenantID,
 		Key:         req.Key,
 		Value:       req.Value,
@@ -293,7 +292,7 @@ func (c *StorageNodeClient) NotifyStreamingComplete(
 	}
 
 	// Call NotifyStreamingComplete RPC
-	grpcReq := &pb.StreamingCompleteRequest{
+	grpcReq := &storagepb.StreamingCompleteRequest{
 		SourceNodeId: node.NodeID,
 		TargetNodeId: targetNodeID,
 	}
@@ -322,7 +321,7 @@ func (c *StorageNodeClient) NotifyStreamingComplete(
 }
 
 // getClient retrieves or creates a gRPC client for a storage node
-func (c *StorageNodeClient) getClient(node *model.StorageNode) (pb.StorageNodeServiceClient, error) {
+func (c *StorageNodeClient) getClient(node *model.StorageNode) (storagepb.StorageNodeServiceClient, error) {
 	// Check if client already exists
 	if client, exists := c.clients[node.NodeID]; exists {
 		return client, nil
@@ -340,7 +339,7 @@ func (c *StorageNodeClient) getClient(node *model.StorageNode) (pb.StorageNodeSe
 		return nil, fmt.Errorf("failed to connect to %s: %w", target, err)
 	}
 
-	client := pb.NewStorageNodeServiceClient(conn)
+	client := storagepb.NewStorageNodeServiceClient(conn)
 
 	// Cache connection and client
 	c.connections[node.NodeID] = conn
@@ -366,7 +365,7 @@ func (c *StorageNodeClient) Close() error {
 	}
 
 	c.connections = make(map[string]*grpc.ClientConn)
-	c.clients = make(map[string]pb.StorageNodeServiceClient)
+	c.clients = make(map[string]storagepb.StorageNodeServiceClient)
 
 	return nil
 }

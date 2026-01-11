@@ -1,0 +1,153 @@
+syntax = "proto3";
+
+package proto;
+
+import "api/common.proto";
+
+option go_package = "github.com/devrev/pairdb/coordinator/pkg/proto;proto";
+
+// StorageNodeService defines the storage node gRPC API
+// Note: Common message types (WriteRequest, ReadRequest, etc.) are defined in common.proto
+service StorageNodeService {
+  // Core Operations
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc Repair(RepairRequest) returns (RepairResponse);
+
+  // Migration Operations
+  rpc ReplicateData(ReplicateRequest) returns (ReplicateResponse);
+  rpc StreamKeys(StreamKeysRequest) returns (stream KeyValueEntry);
+  rpc GetKeyRange(KeyRangeRequest) returns (KeyRangeResponse);
+  rpc DrainNode(DrainRequest) returns (DrainResponse);
+
+  // Streaming Management (Phase 2 - Cassandra Pattern)
+  rpc StartStreaming(StartStreamingRequest) returns (StartStreamingResponse);
+  rpc StopStreaming(StopStreamingRequest) returns (StopStreamingResponse);
+  rpc GetStreamStatus(StreamStatusRequest) returns (StreamStatusResponse);
+  rpc NotifyStreamingComplete(StreamingCompleteRequest) returns (StreamingCompleteResponse);
+
+  // Health Check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Migration-specific Messages (Not in common.proto)
+// ============================================================================
+
+// ReplicateRequest initiates data replication
+message ReplicateRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  repeated string keys = 4;
+  string target_node_id = 5;
+  bool include_vector_clock = 6;
+}
+
+// ReplicateResponse confirms replication
+message ReplicateResponse {
+  bool success = 1;
+  int64 keys_replicated = 2;
+  string error_message = 3;
+}
+
+// StreamKeysRequest initiates key streaming
+message StreamKeysRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  int32 batch_size = 4;
+}
+
+// KeyRangeRequest gets list of keys in range
+message KeyRangeRequest {
+  string tenant_id = 1;
+  string key_range_start = 2;
+  string key_range_end = 3;
+  int32 max_keys = 4;
+}
+
+// KeyRangeResponse returns list of keys
+message KeyRangeResponse {
+  repeated string keys = 1;
+  bool has_more = 2;
+  string next_key = 3;
+}
+
+// DrainRequest prepares node for removal
+message DrainRequest {
+  bool graceful = 1;
+  int32 timeout_seconds = 2;
+}
+
+// DrainResponse confirms drain status
+message DrainResponse {
+  bool success = 1;
+  string status = 2;
+  string error_message = 3;
+}
+
+// ============================================================================
+// Streaming Management Messages (Phase 2 - Cassandra Pattern)
+// ============================================================================
+
+// StreamKeyRange represents a hash range for streaming
+message StreamKeyRange {
+  uint64 start_hash = 1;
+  uint64 end_hash = 2;
+}
+
+// StartStreamingRequest initiates streaming from source to target node
+message StartStreamingRequest {
+  string source_node_id = 1;
+  string target_node_id = 2;
+  string target_host = 3;
+  int32 target_port = 4;
+  repeated StreamKeyRange key_ranges = 5;
+}
+
+// StartStreamingResponse confirms streaming started
+message StartStreamingResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// StopStreamingRequest stops streaming to a target node
+message StopStreamingRequest {
+  string source_node_id = 1;
+  string target_node_id = 2;
+}
+
+// StopStreamingResponse confirms streaming stopped
+message StopStreamingResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// StreamStatusRequest queries the status of streaming
+message StreamStatusRequest {
+  string source_node_id = 1;
+  string target_node_id = 2;
+}
+
+// StreamStatusResponse returns streaming metrics
+message StreamStatusResponse {
+  bool active = 1;
+  string state = 2;
+  int64 keys_copied = 3;
+  int64 keys_streamed = 4;
+  int64 bytes_copied = 5;
+  int64 bytes_streamed = 6;
+}
+
+// StreamingCompleteRequest notifies coordinator that streaming is complete
+message StreamingCompleteRequest {
+  string source_node_id = 1;
+  string target_node_id = 2;
+}
+
+// StreamingCompleteResponse acknowledges streaming completion
+message StreamingCompleteResponse {
+  bool success = 1;
+  string message = 2;
+}

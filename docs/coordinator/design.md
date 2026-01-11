@@ -9,12 +9,13 @@ The Coordinator service is a stateless microservice that handles request routing
 ### 2.1 Functional Requirements
 - Route requests to appropriate storage nodes based on consistent hashing
 - Fetch and cache tenant configurations from metadata store
-- Coordinate read/write operations based on consistency levels (one, quorum, all)
+- Coordinate read/write/delete operations based on consistency levels (one, quorum, all)
 - Aggregate responses from multiple storage node replicas
 - Detect and resolve conflicts using vector clocks
 - Handle idempotency key checking and storage
-- Generate and update vector clocks for write operations
+- Generate and update vector clocks for write and delete operations
 - Trigger repair operations when conflicts are detected
+- Coordinate tombstone writes for delete operations
 
 ### 2.2 Non-Functional Requirements
 - Stateless design for horizontal scalability
@@ -194,13 +195,15 @@ The Coordinator exposes gRPC service APIs for communication with Storage Nodes. 
 **Key gRPC Methods**:
 - `Write(WriteRequest) returns (WriteResponse)` - Write key-value pair to storage node
 - `Read(ReadRequest) returns (ReadResponse)` - Read key-value pair from storage node
+- `Delete(DeleteRequest) returns (DeleteResponse)` - Delete key-value pair (write tombstone) on storage node
 - `Repair(RepairRequest) returns (RepairResponse)` - Repair conflicting data on storage node
 
 ### 5.2 External APIs (via API Gateway)
 
 The Coordinator processes gRPC requests forwarded from the API Gateway (which converts HTTP to gRPC):
-- POST /v1/key-value → gRPC Write
-- GET /v1/key-value → gRPC Read
+- POST /v1/key-value → gRPC WriteKeyValue
+- GET /v1/key-value → gRPC ReadKeyValue
+- DELETE /v1/key-value → gRPC DeleteKeyValue
 - POST /v1/tenants → Tenant creation
 - PUT /v1/tenants/{tenant_id}/replication-factor → Replication factor update
 - GET /v1/tenants/{tenant_id} → Tenant configuration retrieval

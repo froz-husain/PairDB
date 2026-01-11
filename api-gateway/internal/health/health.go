@@ -30,10 +30,24 @@ func NewHealthCheck(grpcClient *grpc.Client, logger *zap.Logger) *HealthCheck {
 		ready:         false,
 		checkInterval: 5 * time.Second,
 	}
-	
+
+	// Perform initial health check immediately
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := hc.grpcClient.HealthCheck(ctx)
+	cancel()
+
+	if err != nil {
+		hc.logger.Warn("initial health check failed", zap.Error(err))
+		hc.ready = false
+	} else {
+		hc.logger.Info("initial health check passed")
+		hc.ready = true
+	}
+	hc.lastCheck = time.Now()
+
 	// Start background health check
 	go hc.backgroundCheck()
-	
+
 	return hc
 }
 

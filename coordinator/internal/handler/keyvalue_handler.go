@@ -15,13 +15,13 @@ import (
 // KeyValueHandler handles key-value operations
 type KeyValueHandler struct {
 	pb.UnimplementedCoordinatorServiceServer
-	coordinatorService *service.CoordinatorService
+	coordinatorService service.CoordinatorServiceInterface
 	logger             *zap.Logger
 }
 
 // NewKeyValueHandler creates a new key-value handler
 func NewKeyValueHandler(
-	coordinatorService *service.CoordinatorService,
+	coordinatorService service.CoordinatorServiceInterface,
 	logger *zap.Logger,
 ) *KeyValueHandler {
 	return &KeyValueHandler{
